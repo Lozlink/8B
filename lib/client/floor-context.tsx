@@ -180,8 +180,16 @@ export function FloorProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
     const key = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
-    if (!url || !key) return;
-    const sb = createClient(url, key, { auth: { persistSession: false, autoRefreshToken: false } });
+    // Misconfigured (missing or still-encrypted) values must not take the floor down: skip Realtime
+    // and rely on polling instead.
+    if (!url || !key || !/^https?:\/\//.test(url)) return;
+    let sb: ReturnType<typeof createClient>;
+    try {
+      sb = createClient(url, key, { auth: { persistSession: false, autoRefreshToken: false } });
+    } catch (e) {
+      console.warn("[realtime] disabled:", e instanceof Error ? e.message : e);
+      return;
+    }
     let debounce: ReturnType<typeof setTimeout> | undefined;
     const channel = sb
       .channel("floor")

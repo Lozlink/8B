@@ -1,3 +1,9 @@
 allowBuilds:
   sharp: false
   unrs-resolver: false
+
+# Next.js reads .env files through @next/env (at build, and again when each server instance
+# starts). dotenvx's drop-in replacement decrypts the committed, encrypted .env.production using
+# DOTENV_PRIVATE_KEY_PRODUCTION (Vercel env) or .env.keys (local).
+overrides:
+  "@next/env": "npm:@dotenvx/next-env@^3.1.0"

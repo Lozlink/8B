@@ -7,12 +7,13 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "next typegen && tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:integration": "vitest run --config vitest.integration.config.mts"
   },
   "dependencies": {
+    "@dotenvx/next-env": "^3.1.0",
     "@supabase/supabase-js": "^2.119.0",
     "bcryptjs": "^3.0.3",
     "jose": "^6.2.17",
