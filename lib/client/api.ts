@@ -48,7 +48,11 @@ function isErrorBody(v: unknown): v is { error: { code: string; message: string;
 }
 
 async function call<T>(method: "GET" | "POST", path: string, body?: unknown): Promise<T> {
+  // A hung request must not freeze the UI: GETs give up after 8 s, POSTs after 35 s (routes cap at 30 s).
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), method === "GET" ? 8000 : 35000);
   let res: Response;
+  let text: string;
   try {
     res = await fetch(path, {
       method,
@@ -56,11 +60,23 @@ async function call<T>(method: "GET" | "POST", path: string, body?: unknown): Pr
       body: body === undefined ? undefined : JSON.stringify(body),
       cache: "no-store",
       credentials: "same-origin",
+      signal: controller.signal,
     });
+    text = await res.text();
   } catch {
+    // An action that timed out may still have gone through on the server (e.g. the charge reached
+    // the Terminal, or the bill was marked paid). Don't invite a blind retry of a money action.
+    if (method === "POST" && controller.signal.aborted) {
+      throw new ApiError(
+        0,
+        "network",
+        "The server didn't answer in time — it may still have gone through. Check the bill's status before trying again.",
+      );
+    }
     throw new ApiError(0, "network", "No connection. Check the Wi-Fi and try again.");
+  } finally {
+    clearTimeout(timer);
   }
-  const text = await res.text();
   let json: unknown = null;
   try {
     json = text ? JSON.parse(text) : null;

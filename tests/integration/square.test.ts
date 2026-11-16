@@ -26,7 +26,7 @@ beforeEach(async () => {
 });
 
 const webhook = (id: string, status: string, referenceId: string | null) =>
-  withTx((tx) => applyWebhookCheckout(tx, { id, status, referenceId, cancelReason: null }));
+  withTx((tx) => applyWebhookCheckout(tx, { id, status, referenceId, cancelReason: null, amountCents: null }));
 
 describe("11. chargeCard", () => {
   it("sends the exact amount with a stable idempotency key and records the checkout", async () => {
@@ -139,7 +139,7 @@ describe("13. webhook completion", () => {
     const id = await awaitingPayment(h);
     await chargeCard(h.staff.actor, id);
     await webhook("chk_1", "IN_PROGRESS", id);
-    await withTx((tx) => applyWebhookCheckout(tx, { id: "chk_1", status: "CANCELED", referenceId: id, cancelReason: "BUYER_CANCELED" }));
+    await withTx((tx) => applyWebhookCheckout(tx, { id: "chk_1", status: "CANCELED", referenceId: id, cancelReason: "BUYER_CANCELED", amountCents: null }));
     const [co] = await getCheckouts(h, id);
     expect(co).toMatchObject({ status: "CANCELED", cancel_reason: "BUYER_CANCELED" });
     expect((await getSession(h, id)).status).toBe("awaiting_payment");
@@ -205,19 +205,19 @@ describe("14. markPaid with a live checkout", () => {
 });
 
 describe("15. webhook after staff settlement", () => {
-  it("COMPLETED after staff marked paid by card is confirmed, not a conflict", async () => {
+  it("COMPLETED after staff marked paid by card while the Terminal was still cancelling is a payment.conflict (R2)", async () => {
     const id = await awaitingPayment(h);
     await chargeCard(h.staff.actor, id);
-    // Terminal says the cancel is still pending (card tapped at the same instant).
-    h.gateway.cancelFor.set("chk_1", "CANCELED");
+    // Terminal says the cancel is still pending (card may be tapped at the same instant).
+    h.gateway.cancelFor.set("chk_1", "CANCEL_REQUESTED");
     await markPaid(h.staff.actor, id, "card", { cardConfirmed: true }, at(70));
     expect((await getSession(h, id)).settled_via).toBe("staff");
 
     await webhook("chk_1", "COMPLETED", id);
     const s = await getSession(h, id);
     expect(s).toMatchObject({ status: "paid", settled_method: "card", settled_via: "staff" });
-    expect(await audits(h, id, "payment.confirmed_by_square")).toHaveLength(1);
-    expect(await audits(h, id, "payment.conflict")).toHaveLength(0);
+    expect(await audits(h, id, "payment.conflict")).toHaveLength(1);
+    expect(await audits(h, id, "payment.confirmed_by_square")).toHaveLength(0);
   });
 
   it("COMPLETED after staff marked paid in cash raises a payment.conflict", async () => {
@@ -245,10 +245,18 @@ describe("16. unknown checkout in a webhook", () => {
     expect(rows[0].entity).toBe("square_checkout");
   });
 
-  it("returns unknown when the reference points at a real session but the checkout id isn't ours", async () => {
+  it("adopts an unrecognised checkout whose reference is a real awaiting session (R3)", async () => {
     const id = await awaitingPayment(h);
-    expect(await webhook("chk_stranger", "COMPLETED", id)).toBe("unknown");
-    expect((await getSession(h, id)).status).toBe("awaiting_payment");
+    expect(await webhook("chk_stranger", "COMPLETED", id)).toBe("applied");
+    const [co] = await getCheckouts(h, id);
+    expect(co).toMatchObject({ id: "chk_stranger", attempt: 1 });
+    expect(await getSession(h, id)).toMatchObject({ status: "paid", checkout_attempt: 1, square_checkout_id: "chk_stranger" });
+    expect(await audits(h, id, "checkout.adopted")).toHaveLength(1);
+    expect(await audits(h, "chk_stranger", "webhook.unknown_checkout")).toHaveLength(0);
+  });
+
+  it("a reference to a session that doesn't exist is unknown and audited on the square_checkout", async () => {
+    expect(await webhook("chk_stranger", "COMPLETED", "00000000-0000-4000-8000-0000000000ff")).toBe("unknown");
     expect(await audits(h, "chk_stranger", "webhook.unknown_checkout")).toHaveLength(1);
   });
 

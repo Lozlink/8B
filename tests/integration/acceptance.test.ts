@@ -53,7 +53,7 @@ describe("section 10 acceptance", () => {
     expect(h.gateway.creates[0]).toMatchObject({ amountCents: 3542, deviceId: "DEVICE_TEST", referenceId: id });
 
     freeze(at(100)); // webhook arrives 5 min after the stop
-    await withTx((tx) => applyWebhookCheckout(tx, { id: "chk_1", status: "COMPLETED", referenceId: id, cancelReason: null }));
+    await withTx((tx) => applyWebhookCheckout(tx, { id: "chk_1", status: "COMPLETED", referenceId: id, cancelReason: null, amountCents: null }));
 
     const s = await getSession(h, id);
     expect(s).toMatchObject({ status: "paid", settled_method: "card", settled_via: "square_webhook", settled_by: null });

@@ -35,7 +35,8 @@ export function useAction() {
       setPending(true);
       try {
         const result = await fn();
-        if (opts.refetch !== false) void refetch?.();
+        // Wait for the fresh floor before re-enabling buttons, so a second tap can't hit stale state.
+        if (opts.refetch !== false) await refetch?.();
         return result;
       } catch (e) {
         if (opts.onError?.(e)) return undefined;
@@ -47,7 +48,7 @@ export function useAction() {
         if (opts.inline) opts.inline(errorMessage(e));
         else toast.show(errorMessage(e), "error");
         // State may have moved under us (another iPad): resync.
-        if (e instanceof ApiError && e.status === 409) void refetch?.();
+        if (e instanceof ApiError && e.status === 409) await refetch?.();
         return undefined;
       } finally {
         busy.current = false;

@@ -34,7 +34,7 @@ Prerequisites: Node 22+, pnpm, Docker (for `supabase start`) and the Supabase CL
 pnpm install
 supabase start                 # local Postgres + Realtime
 supabase db reset              # applies migrations + supabase/seed.sql (sets the local timer_app password)
-cp .env.example .env.local     # fill in; anon key + URL come from `supabase status`
+cp .env.production .env.local  # then replace the values with local ones (`supabase status` shows the anon key + URL)
 pnpm dev                       # runs `dotenvx run -f .env.local -- next dev`
 ```
 
@@ -68,8 +68,20 @@ pnpm typecheck && pnpm lint
 
 ### Vercel
 
-1. Set every variable in `.env.example` for Production.
-2. `vercel.json` pins functions to `syd1`.
+Secrets live in git as the dotenvx-encrypted `.env.production`. `@dotenvx/next-env` replaces Next's built-in env loader through the override in `pnpm-workspace.yaml`, so Next decrypts the file itself, both at build time (for the `NEXT_PUBLIC_*` values baked into the browser bundle) and when each server instance starts.
+
+1. In Vercel, set **one** env var for Production: `DOTENV_PRIVATE_KEY_PRODUCTION`, with the value from your local `.env.keys`. Never commit `.env.keys`.
+2. Don't also set the app's variables directly in Vercel. A value set there overrides the file, and you end up with two sources of truth.
+3. To change a secret, run `pnpm exec dotenvx set KEY "value" -f .env.production`, then commit and push.
+4. `vercel.json` pins functions to `syd1`.
+
+`DATABASE_URL` must use Supabase's **transaction pooler**, which has an IPv4 address. The direct `db.<ref>.supabase.co` host is IPv6-only, and Vercel functions can't reach it.
+
+Vercel Authentication is on for `*.vercel.app` URLs, so the iPads and Square's webhook must use the custom domain, `https://8balllounge.com.au`.
+
+Only `DATABASE_URL`, `SESSION_SECRET` and `DEVICE_ENROL_CODE` are needed for the app to run:
+- Without the `SQUARE_*` Terminal settings, Charge card and pairing say "not set up", and staff use Square POS plus Mark paid.
+- Without the webhook settings, the webhook answers 503 so Square retries later. In the meantime the app still picks up card payments by asking Square itself.
 
 ### Square
 

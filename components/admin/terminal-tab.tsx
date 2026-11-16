@@ -29,12 +29,13 @@ export function TerminalTab({ state, reload, onError }: TabProps) {
           setPairing(next);
           if (next.status === "PAIRED") void reload();
         })
-        .catch(() => {
-          // keep polling; a transient error shouldn't kill the pairing screen
+        .catch((e: unknown) => {
+          // Elevation expired: onError re-prompts for the PIN. Anything else is transient, keep polling.
+          onError(e);
         });
     }, 3000);
     return () => clearInterval(id);
-  }, [codeId, waiting, reload]);
+  }, [codeId, waiting, reload, onError]);
 
   const startPairing = async () => {
     const code = await run(() => api.pairTerminal(), { refetch: false, onError: (e) => (isManagerRequired(e) ? onError(e) : false) });

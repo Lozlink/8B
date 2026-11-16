@@ -148,7 +148,7 @@ describe("getSessionDetail", () => {
   it("includes the checkouts and the bill's checkout events", async () => {
     const id = await awaitingPayment(h);
     await chargeCard(h.staff.actor, id);
-    await withTx((tx) => applyWebhookCheckout(tx, { id: "chk_1", status: "COMPLETED", referenceId: id, cancelReason: null }));
+    await withTx((tx) => applyWebhookCheckout(tx, { id: "chk_1", status: "COMPLETED", referenceId: id, cancelReason: null, amountCents: null }));
     const d = await getSessionDetail(id);
     expect(d.checkouts).toHaveLength(1);
     expect(d.checkouts[0].status).toBe("COMPLETED");
@@ -323,7 +323,7 @@ describe("getSummary", () => {
     const id = await awaitingPayment(h, "Table 1", 60);
     await chargeCard(actor, id);
     await markPaid(actor, id, "cash", { cardConfirmed: false }, at(70));
-    await withTx((tx) => applyWebhookCheckout(tx, { id: "chk_1", status: "COMPLETED", referenceId: id, cancelReason: null }));
+    await withTx((tx) => applyWebhookCheckout(tx, { id: "chk_1", status: "COMPLETED", referenceId: id, cancelReason: null, amountCents: null }));
     const other = await awaitingPayment(h, "Table 2", 60);
     await markPaid(actor, other, "cash", { cardConfirmed: false }, at(70));
     await (await import("@/lib/server/sessions")).reversePaid(managerActor, manager, other, "Wrong amount keyed");

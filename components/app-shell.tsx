@@ -30,7 +30,7 @@ function OfflineOverlay() {
         Offline — write start times on the paper sheet
       </h2>
       <p className="max-w-lg text-lg text-muted">
-        This screen will come back by itself as soon as the connection returns. Nothing you tap now is saved.
+        Can&apos;t reach the server. This screen will come back by itself as soon as it responds. Nothing you tap now is saved.
       </p>
     </div>
   );

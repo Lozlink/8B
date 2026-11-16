@@ -3,7 +3,7 @@ import { cookies, headers } from "next/headers";
 import { SignJWT, jwtVerify, type JWTPayload } from "jose";
 import { compare, hash } from "bcryptjs";
 import { timingSafeEqual, createHash } from "node:crypto";
-import { db, type Db } from "./db";
+import { db, withTx, type Db, type Tx } from "./db";
 import { env } from "./env";
 import { AppError, forbidden, tooMany, unauthorized, badRequest } from "./errors";
 import type { StaffRole } from "@/lib/domain/types";
@@ -119,27 +119,40 @@ export async function clientIp(): Promise<string | null> {
 }
 
 async function recordAttempt(
+  q: Db,
   kind: AttemptKind,
   success: boolean,
   ids: { deviceId?: string | null; staffId?: string | null; ip?: string | null },
 ): Promise<void> {
-  await db()`
+  await q`
     insert into public.login_attempts (kind, success, device_id, staff_id, ip)
     values (${kind}, ${success}, ${ids.deviceId ?? null}, ${ids.staffId ?? null}, ${ids.ip ?? null})`;
 }
 
 async function failuresSince(
+  q: Db,
   column: "device_id" | "staff_id" | "ip",
   value: string,
   kind: AttemptKind,
   minutes: number,
 ): Promise<number> {
-  const sql = db();
-  const [row] = await sql<{ n: number }[]>`
+  const [row] = await q<{ n: number }[]>`
     select count(*)::int as n from public.login_attempts
-    where ${sql(column)} = ${value} and kind = ${kind} and not success
+    where ${q(column)} = ${value} and kind = ${kind} and not success
       and at > now() - make_interval(mins => ${minutes})`;
   return row?.n ?? 0;
+}
+
+/**
+ * Serialises attempts that share a throttle bucket. Check → verify → record happens while holding
+ * a transaction-scoped advisory lock, so parallel requests can't all pass the "fewer than N
+ * failures" check before any of them records a failure. Keys are locked in sorted order so two
+ * callers taking several keys can't deadlock.
+ */
+async function lockBuckets(tx: Tx, keys: string[]): Promise<void> {
+  for (const k of [...keys].sort()) {
+    await tx`select pg_advisory_xact_lock(hashtext(${"throttle:" + k}))`;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -155,12 +168,18 @@ function constantTimeEqual(a: string, b: string): boolean {
 
 export async function checkEnrolCode(code: string): Promise<void> {
   const ip = await clientIp();
-  if (ip && (await failuresSince("ip", ip, "enrol", 60)) >= 10) {
-    throw tooMany("Too many attempts. Try again in an hour.");
-  }
-  const okCode = constantTimeEqual(code.trim(), env().DEVICE_ENROL_CODE);
-  await recordAttempt("enrol", okCode, { ip });
-  if (!okCode) throw forbidden("That enrolment code isn't right.");
+  const outcome = await withTx(async (tx) => {
+    if (ip) {
+      await lockBuckets(tx, [`enrol:ip:${ip}`]);
+      if ((await failuresSince(tx, "ip", ip, "enrol", 60)) >= 10) return "throttled" as const;
+    }
+    const okCode = constantTimeEqual(code.trim(), env().DEVICE_ENROL_CODE);
+    await recordAttempt(tx, "enrol", okCode, { ip });
+    return okCode ? ("ok" as const) : ("wrong" as const);
+  });
+  // Thrown after commit so the failed attempt stays recorded.
+  if (outcome === "throttled") throw tooMany("Too many attempts. Try again in an hour.");
+  if (outcome === "wrong") throw forbidden("That enrolment code isn't right.");
 }
 
 export async function setDeviceCookie(deviceId: string, label: string): Promise<void> {
@@ -190,20 +209,25 @@ export async function login(staffId: string, pin: string): Promise<Actor> {
   const device = await requireDevice();
   assertPinFormat(pin);
 
-  if ((await failuresSince("staff_id", staffId, "login", 15)) >= 5) {
+  type Found = { id: string; name: string; role: StaffRole; pin_hash: string };
+  const outcome = await withTx(async (tx) => {
+    await lockBuckets(tx, [`login:device:${device.id}`, `login:staff:${staffId}`]);
+    if ((await failuresSince(tx, "staff_id", staffId, "login", 15)) >= 5) return { kind: "staff_throttled" as const };
+    if ((await failuresSince(tx, "device_id", device.id, "login", 15)) >= 15) return { kind: "device_throttled" as const };
+    const [found] = await tx<Found[]>`
+      select id, name, role, pin_hash from public.staff where id = ${staffId} and active`;
+    const good = found ? await pinMatches(pin, found.pin_hash) : false;
+    await recordAttempt(tx, "login", good, { deviceId: device.id, staffId: found ? found.id : null });
+    return good && found ? { kind: "ok" as const, staff: found } : { kind: "wrong" as const };
+  });
+  if (outcome.kind === "staff_throttled") {
     throw tooMany("Too many wrong PINs for this person. Wait 15 minutes or ask a manager.");
   }
-  if ((await failuresSince("device_id", device.id, "login", 15)) >= 15) {
-    throw tooMany("Too many wrong PINs on this device. Wait 15 minutes.");
-  }
-
-  const [s] = await db()<{ id: string; name: string; role: StaffRole; pin_hash: string }[]>`
-    select id, name, role, pin_hash from public.staff where id = ${staffId} and active`;
-  const good = s ? await pinMatches(pin, s.pin_hash) : false;
-  await recordAttempt("login", good, { deviceId: device.id, staffId: s ? s.id : null });
+  if (outcome.kind === "device_throttled") throw tooMany("Too many wrong PINs on this device. Wait 15 minutes.");
   // Distinct code: the client treats 401 "unauthorized" as "session expired → /login", which would
   // bounce the login page itself on a mistyped PIN.
-  if (!s || !good) throw new AppError(401, "invalid_credentials", "Wrong PIN.");
+  if (outcome.kind !== "ok") throw new AppError(401, "invalid_credentials", "Wrong PIN.");
+  const s = outcome.staff;
 
   const token = await sign({ sub: s.id, dev: device.id }, SESSION_TTL_S, "staff");
   const jar = await cookies();
@@ -247,21 +271,24 @@ export async function requireActor(): Promise<Actor> {
 /** Checks a manager PIN typed on this device. Throttled per device. */
 export async function verifyManagerPin(actor: Actor, pin: string): Promise<Manager> {
   assertPinFormat(pin);
-  if ((await failuresSince("device_id", actor.deviceId, "manager", 15)) >= 5) {
-    throw tooMany("Too many wrong manager PINs on this device. Wait 15 minutes.");
-  }
-  const managers = await db()<{ id: string; name: string; pin_hash: string }[]>`
-    select id, name, pin_hash from public.staff where active and role = 'manager'`;
-  let match: Manager | null = null;
-  for (const m of managers) {
-    if (await pinMatches(pin, m.pin_hash)) {
-      match = { id: m.id, name: m.name };
-      break;
+  const outcome = await withTx(async (tx) => {
+    await lockBuckets(tx, [`manager:device:${actor.deviceId}`]);
+    if ((await failuresSince(tx, "device_id", actor.deviceId, "manager", 15)) >= 5) return "throttled" as const;
+    const managers = await tx<{ id: string; name: string; pin_hash: string }[]>`
+      select id, name, pin_hash from public.staff where active and role = 'manager'`;
+    let match: Manager | null = null;
+    for (const m of managers) {
+      if (await pinMatches(pin, m.pin_hash)) {
+        match = { id: m.id, name: m.name };
+        break;
+      }
     }
-  }
-  await recordAttempt("manager", match !== null, { deviceId: actor.deviceId, staffId: match?.id ?? null });
-  if (!match) throw forbidden("That isn't a manager PIN.");
-  return match;
+    await recordAttempt(tx, "manager", match !== null, { deviceId: actor.deviceId, staffId: match?.id ?? null });
+    return match;
+  });
+  if (outcome === "throttled") throw tooMany("Too many wrong manager PINs on this device. Wait 15 minutes.");
+  if (!outcome) throw forbidden("That isn't a manager PIN.");
+  return outcome;
 }
 
 /** Admin screens: unlock for 10 minutes with a manager PIN. */

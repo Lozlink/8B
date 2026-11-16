@@ -33,7 +33,7 @@ export function ToastProvider({ children }: { children: ReactNode }) {
   const show = useCallback((message: string, kind: ToastKind = "info") => {
     const id = nextId.current++;
     setItems((prev) => [...prev.slice(-3), { id, kind, message }]);
-    window.setTimeout(() => setItems((prev) => prev.filter((t) => t.id !== id)), kind === "error" ? 7000 : 3500);
+    window.setTimeout(() => setItems((prev) => prev.filter((t) => t.id !== id)), kind === "error" ? 6000 : 3000);
   }, []);
 
   const api = useMemo(() => ({ show }), [show]);
@@ -47,12 +47,15 @@ export function ToastProvider({ children }: { children: ReactNode }) {
         className="pointer-events-none fixed inset-x-0 bottom-0 z-[60] flex flex-col items-center gap-2 px-4 pb-[calc(env(safe-area-inset-bottom)+1rem)]"
       >
         {items.map((t) => (
-          <div
+          <button
+            type="button"
             key={t.id}
-            className={`pointer-events-auto w-full max-w-xl rounded-xl border px-4 py-3 text-base shadow-lg ${KIND_CLASS[t.kind]}`}
+            aria-label={`${t.message} (tap to dismiss)`}
+            onClick={() => setItems((prev) => prev.filter((x) => x.id !== t.id))}
+            className={`pointer-events-auto w-full max-w-xl rounded-xl border px-4 py-3 text-left text-base shadow-lg ${KIND_CLASS[t.kind]}`}
           >
             {t.message}
-          </div>
+          </button>
         ))}
       </div>
     </ToastContext.Provider>

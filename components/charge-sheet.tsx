@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { ActionDialog } from "@/components/action-dialog";
 import { Badge, Button, Notice, Sheet, Spinner } from "@/components/ui";
@@ -26,7 +26,7 @@ interface Props {
 export function ChargeSheet({ sessionId, onClose }: Props) {
   const router = useRouter();
   const toast = useToast();
-  const { floor, refetch } = useFloor();
+  const { floor, refetch, version } = useFloor();
   const { run, pending } = useAction();
   const [detail, setDetail] = useState<SessionDetailDTO | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -34,6 +34,10 @@ export function ChargeSheet({ sessionId, onClose }: Props) {
   const [confirmCard, setConfirmCard] = useState(false);
   const [alreadyCard, setAlreadyCard] = useState(false);
   const [warnings, setWarnings] = useState<string[]>([]);
+  const onCloseRef = useRef(onClose);
+  useEffect(() => {
+    onCloseRef.current = onClose;
+  });
 
   const load = useCallback(async () => {
     try {
@@ -46,59 +50,92 @@ export function ChargeSheet({ sessionId, onClose }: Props) {
     }
   }, [sessionId, router]);
 
-  useLoad(load);
+  // Reload on open and whenever the floor refreshes (another iPad may have changed this bill).
+  useLoad(load, version);
 
   const session = detail?.session ?? null;
   const live = !!session && session.status === "awaiting_payment" && isCheckoutLive(session.checkout?.status);
+  // Stale data must not be paid against: block money actions until a refresh succeeds.
+  const stale = loadError !== null;
 
-  // While the "Sent to Terminal" panel is open, ask Square every 5 s (the webhook also reconciles).
+  // While the "Sent to Terminal" panel is open, ask Square every ~5 s. One request at a time, and
+  // paused while an action is running or the confirm dialog is open (sync holds the session lock).
+  const paused = pending || confirmCard;
   useEffect(() => {
-    if (!live) return;
-    const id = setInterval(() => {
-      void (async () => {
-        try {
-          await api.sync(sessionId);
-        } catch {
-          // transient; the next tick or the webhook will catch up
-        }
-        await load();
-        void refetch();
-      })();
-    }, SYNC_MS);
-    return () => clearInterval(id);
-  }, [live, sessionId, load, refetch]);
+    if (!live || paused) return;
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const tick = async () => {
+      try {
+        await api.sync(sessionId);
+      } catch {
+        // transient; the next tick or the webhook will catch up
+      }
+      if (cancelled) return;
+      await load();
+      if (cancelled) return;
+      void refetch();
+      timer = setTimeout(() => void tick(), SYNC_MS);
+    };
+    timer = setTimeout(() => void tick(), SYNC_MS);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [live, paused, sessionId, load, refetch]);
 
   const paid = session?.status === "paid";
   const quietPaid = paid && warnings.length === 0 && !alreadyCard;
   useEffect(() => {
     if (!quietPaid) return;
-    const id = setTimeout(onClose, 2500);
+    const id = setTimeout(() => onCloseRef.current(), 2500);
     return () => clearTimeout(id);
-  }, [quietPaid, onClose]);
+  }, [quietPaid]);
 
-  const act = async <T,>(fn: () => Promise<T>): Promise<T | undefined> => {
-    const result = await run(fn);
-    await load();
-    return result;
-  };
+  /** Runs a server call, applies its outcome flags, THEN reloads, all before buttons re-enable. */
+  const act = async <T,>(fn: () => Promise<T>, onResult: (r: T) => void): Promise<T | undefined> =>
+    run(async () => {
+      const r = await fn();
+      onResult(r);
+      await load();
+      return r;
+    });
 
-  const handleCharge = async (kind: "charge" | "resend") => {
-    const r = await act(() => (kind === "charge" ? api.charge(sessionId) : api.resend(sessionId)));
-    if (r?.kind === "already_paid_by_card") setAlreadyCard(true);
-  };
+  const handleCharge = (kind: "charge" | "resend") =>
+    act(
+      () => (kind === "charge" ? api.charge(sessionId) : api.resend(sessionId)),
+      (r) => {
+        if (r.kind === "already_paid_by_card") setAlreadyCard(true);
+      },
+    );
 
-  const handleCancel = async () => {
-    const r = await act(() => api.cancelCheckout(sessionId));
-    if (!r) return;
-    if (r.warnings.length) setWarnings(r.warnings);
-    if (r.paid) setAlreadyCard(true);
-  };
+  const handleCancel = () =>
+    act(
+      () => api.cancelCheckout(sessionId),
+      (r) => {
+        if (r.paid) setAlreadyCard(true);
+        if (r.warnings.length) setWarnings(r.warnings);
+      },
+    );
 
-  const handleMarkPaid = async (method: "card" | "cash") => {
-    const r = await act(() => api.markPaid(sessionId, method, method === "card"));
-    if (!r) return;
-    if (r.warnings.length) setWarnings(r.warnings);
-    if (r.kind === "already_paid_by_card") setAlreadyCard(true);
+  const handleCash = () =>
+    act(
+      () => api.markPaid(sessionId, "cash", false),
+      (r) => {
+        if (r.kind === "already_paid_by_card") setAlreadyCard(true);
+        if (r.warnings.length) setWarnings(r.warnings);
+      },
+    );
+
+  /** Refresh first: the amount to ring into Square must be the current one. */
+  const goCash = async () => {
+    const d = await run(async () => {
+      const fresh = await api.session(sessionId);
+      setDetail(fresh);
+      setLoadError(null);
+      return fresh;
+    });
+    if (d && d.session.status === "awaiting_payment" && !isCheckoutLive(d.session.checkout?.status)) setMode("cash");
   };
 
   const handleRelease = async () => {
@@ -126,6 +163,14 @@ export function ChargeSheet({ sessionId, onClose }: Props) {
         )
       ) : (
         <div className="flex flex-col gap-5">
+          {stale ? (
+            <Notice tone="warn">
+              <span className="block">Couldn&apos;t refresh this bill, so the figures may be out of date. {loadError}</span>
+              <Button className="mt-2" onClick={() => void load()}>
+                Retry
+              </Button>
+            </Notice>
+          ) : null}
           {alreadyCard ? (
             <Notice tone="danger" strong>
               {ALREADY_PAID}
@@ -173,7 +218,7 @@ export function ChargeSheet({ sessionId, onClose }: Props) {
                 Ring &lsquo;Table hire&rsquo; for {formatCents(session?.totalCents ?? detail.breakdown?.totalCents ?? 0)} as Cash in
                 Square POS — the drawer will open. Then tap Mark paid – cash.
               </Notice>
-              <Button variant="primary" size="lg" disabled={pending} onClick={() => void handleMarkPaid("cash")}>
+              <Button variant="primary" size="lg" disabled={pending || stale} onClick={() => void handleCash()}>
                 {pending ? "Saving…" : "Mark paid – cash"}
               </Button>
               <Button size="lg" disabled={pending} onClick={() => setMode("choose")}>
@@ -183,19 +228,21 @@ export function ChargeSheet({ sessionId, onClose }: Props) {
           ) : (
             <div className="flex flex-col gap-3">
               {session?.checkout?.status === "CANCELED" ? <Notice tone="warn">Card not completed. Charge again or take another payment.</Notice> : null}
-              {session?.checkout?.status === "COMPLETED" ? <Notice tone="info">Card approved. Confirming with Square…</Notice> : null}
+              {session?.checkout?.status === "COMPLETED" ? (
+                <Notice tone="warn">Card payment was reversed — take payment again.</Notice>
+              ) : null}
               {floor && !floor.terminalPaired ? (
                 <Notice tone="warn">No Terminal is paired. Ring it up in Square POS, then tap Mark paid – card.</Notice>
               ) : null}
               <Button
                 variant="primary"
                 size="lg"
-                disabled={pending || !floor || !floor.terminalPaired}
+                disabled={pending || stale || !floor || !floor.terminalPaired}
                 onClick={() => void handleCharge("charge")}
               >
                 {pending ? "Sending…" : "Charge card"}
               </Button>
-              <Button size="lg" disabled={pending} onClick={() => setMode("cash")}>
+              <Button size="lg" disabled={pending || stale} onClick={() => void goCash()}>
                 Cash
               </Button>
               {session?.currentTableId ? (
@@ -203,7 +250,7 @@ export function ChargeSheet({ sessionId, onClose }: Props) {
                   Leave unpaid
                 </Button>
               ) : null}
-              <Button variant="ghost" disabled={pending} onClick={() => setConfirmCard(true)}>
+              <Button variant="ghost" disabled={pending || stale} onClick={() => setConfirmCard(true)}>
                 Mark paid – card
               </Button>
             </div>
@@ -233,16 +280,17 @@ function Total({ detail }: { detail: SessionDetailDTO }) {
   // The stored bill is authoritative once stopped; the breakdown is only a fallback while running.
   const total = s.totalCents ?? b?.totalCents ?? null;
   const minutes = s.billedMinutes ?? b?.billedMinutes ?? null;
+  const lines = b && b.totalCents === total ? b.lines : [];
   return (
     <section aria-label="Bill" className="rounded-2xl border border-line bg-bg p-4 text-center">
       <p className="text-6xl font-bold tabular-nums">{total !== null ? formatCents(total) : "—"}</p>
       <p className="mt-2 text-lg text-muted">
         {minutes !== null ? `${minutes} min billed` : "Minutes pending"}
-        {total !== null ? ` · GST incl. ${formatCents(b?.gstCents ?? gstOf(total))}` : ""}
+        {total !== null ? ` · GST incl. ${formatCents(gstOf(total))}` : ""}
       </p>
-      {b && b.lines.length > 0 ? (
+      {lines.length > 0 ? (
         <ul className="mt-3 divide-y divide-line border-t border-line text-left text-base">
-          {b.lines.map((l) => (
+          {lines.map((l) => (
             <li key={l.rateCardId} className="flex justify-between gap-3 py-2">
               <span>
                 {l.rateCardName} <span className="text-muted">· {l.minutes} min @ {formatCents(l.centsPerHour)}/h</span>

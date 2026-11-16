@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useState, type ReactNode } from "react";
+import { useCallback, useRef, useState, type ReactNode } from "react";
 import { useRouter } from "next/navigation";
 import { ActionDialog } from "@/components/action-dialog";
 import { SessionDetailSheet } from "@/components/session-detail-sheet";
@@ -27,11 +27,17 @@ export function SummaryView() {
   const [detailId, setDetailId] = useState<string | null>(null);
   const [reversing, setReversing] = useState<PaidItem | null>(null);
 
+  const seq = useRef(0);
+
   const load = useCallback(async () => {
+    const mine = ++seq.current;
     try {
-      setData(await api.summary(date ?? undefined));
+      const result = await api.summary(date ?? undefined);
+      if (mine !== seq.current) return; // a newer request superseded this one
+      setData(result);
       setError(null);
     } catch (e) {
+      if (mine !== seq.current) return;
       const dest = authRedirect(e);
       if (dest) router.replace(dest);
       else setError(errorMessage(e));

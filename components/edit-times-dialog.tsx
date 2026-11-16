@@ -52,10 +52,18 @@ export function EditTimesDialog({ session, timeZone, onClose, onDone }: Props) {
   const update = (id: string, patch: Partial<Pick<Row, "start" | "end">>) =>
     setRows((prev) => prev.map((r) => (r.id === id ? { ...r, ...patch } : r)));
 
+  // Compare real instants, not wall-clock strings (clocks going back repeat an hour).
+  const startIso = (r: Row) => (r.start === r.originalStart ? r.originalStartIso : localInputToIso(r.start, timeZone, r.originalStartIso));
+  const endIso = (r: Row) =>
+    r.end === null ? null : r.end === r.originalEnd ? r.originalEndIso : localInputToIso(r.end, timeZone, r.originalEndIso ?? r.originalStartIso);
+
   const problems = rows.map((r) => {
     if (!r.start) return "Start time is required.";
     if (r.end !== null && !r.end) return "End time is required.";
-    if (r.end !== null && r.end <= r.start) return "End must be after start.";
+    const s = startIso(r);
+    const e = endIso(r);
+    if (!s || (r.end !== null && !e)) return "That isn't a valid time.";
+    if (e && Date.parse(e) <= Date.parse(s)) return "End must be after start.";
     return null;
   });
   const changed = rows.some((r) => r.start !== r.originalStart || r.end !== r.originalEnd);
@@ -64,9 +72,8 @@ export function EditTimesDialog({ session, timeZone, onClose, onDone }: Props) {
   const submit = async ({ pin, reason }: { pin: string; reason: string }) => {
     const intervals: IntervalEditInput[] = rows.map((r) => {
       // Untouched fields keep their exact original instant (seconds included).
-      const startedAt = r.start === r.originalStart ? r.originalStartIso : localInputToIso(r.start, timeZone);
-      const endedAt =
-        r.end === null ? null : r.end === r.originalEnd ? r.originalEndIso : localInputToIso(r.end, timeZone);
+      const startedAt = startIso(r);
+      const endedAt = endIso(r);
       if (!startedAt || (r.end !== null && !endedAt)) throw new Error("One of the times isn't valid.");
       return { id: r.id, startedAt, endedAt };
     });

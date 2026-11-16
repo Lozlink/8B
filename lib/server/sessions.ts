@@ -334,17 +334,28 @@ async function applyCheckoutState(
       select count(*)::int as n from public.terminal_checkouts
       where session_id = ${s.id} and status = 'COMPLETED'`;
     const completedCount = c?.n ?? 0;
-    if (s.settled_method === "card" && completedCount <= 1) {
+    // A staff settlement only succeeds when Square did NOT report this checkout as completed at that
+    // moment (markPaid cancels first and takes the "already paid" path otherwise). So a COMPLETED
+    // arriving afterwards may be a second payment — always flag it for a human to check.
+    const settledBySquare = s.settled_via === "square_webhook" || s.settled_via === "square_api";
+    if (settledBySquare && completedCount <= 1) {
       await audit(tx, { ...base, action: "payment.confirmed_by_square", after: { ...checkoutInfo, settled_via: s.settled_via } });
     } else {
       await audit(tx, {
         ...base,
         action: "payment.conflict",
-        after: { ...checkoutInfo, settled_method: s.settled_method, completed_checkouts: completedCount },
+        after: {
+          ...checkoutInfo,
+          settled_method: s.settled_method,
+          settled_via: s.settled_via,
+          completed_checkouts: completedCount,
+        },
         reason:
           s.settled_method === "cash"
             ? "A card payment completed on the Terminal after this session was marked paid in cash. Check for a double payment and refund one in Square."
-            : "More than one card payment completed for this session. Refund the duplicate in Square.",
+            : s.settled_via === "staff"
+              ? "Square reported a card payment completing on the Terminal after staff marked this bill paid by card. If the card was taken on the Terminal it's the same payment and nothing needs doing; if it was taken another way (e.g. the Stand reader), the customer paid twice — refund one in Square."
+              : "More than one card payment completed for this session. Refund the duplicate in Square.",
       });
     }
     return true;
@@ -492,8 +503,10 @@ export async function chargeCard(actor: Actor, id: string): Promise<ChargeOutcom
   });
 }
 
+type Refused = { kind: "refused"; message: string };
+
 export async function resendCheckout(actor: Actor, id: string): Promise<ChargeOutcome> {
-  return withTx(async (tx) => {
+  const result = await withTx<ChargeOutcome | Refused>(async (tx) => {
     const s = await mustLock(tx, id);
     assertCan(s.status, "resend_checkout");
     const settings = await getSettings(tx);
@@ -501,17 +514,22 @@ export async function resendCheckout(actor: Actor, id: string): Promise<ChargeOu
     const r = await cancelLiveCheckouts(tx, s, actor);
     if (r.completed) return { kind: "already_paid_by_card" };
     if (r.cancelPending || r.warnings.length > 0) {
-      // Never put a second request on the Terminal while the first could still take money.
-      throw conflict(
-        r.warnings[0] ??
+      // Never put a second request on the Terminal while the first could still take money. Return
+      // (not throw) so the cancel we already sent to Square — its status and audit row — commits.
+      return {
+        kind: "refused",
+        message:
+          r.warnings[0] ??
           "The Terminal is still cancelling the previous request (this can take up to a minute if a card was being presented). Try again shortly.",
-      );
+      };
     }
     const fresh = await mustLock(tx, id);
     const co = await sendAttempt(tx, fresh, actor, settings.terminalDeviceId);
     if (co.status === "COMPLETED") return { kind: "already_paid_by_card" };
     return { kind: "sent", checkoutId: co.id, amountCents: co.amountCents };
   });
+  if (result.kind === "refused") throw conflict(result.message);
+  return result;
 }
 
 export async function cancelCheckout(actor: Actor, id: string): Promise<{ status: CheckoutStatus | null; paid: boolean; warnings: string[] }> {
@@ -527,18 +545,34 @@ export async function cancelCheckout(actor: Actor, id: string): Promise<{ status
   });
 }
 
+/**
+ * Asks Square for its view of a checkout, then applies it under the session lock. The Square call
+ * is made WITHOUT holding the lock, so a slow Square never blocks Cancel / Mark paid on the same
+ * bill. That's safe because applyCheckoutState only ever moves a checkout's status forward.
+ */
+async function reconcileCheckout(checkoutId: string, sessionId: string, actor: Actor | null): Promise<void> {
+  const state = await gateway.get(checkoutId);
+  await withTx(async (tx) => {
+    const s = await lockSession(tx, sessionId);
+    if (!s) return;
+    const [c] = await tx<CheckoutRow[]>`
+      select * from public.terminal_checkouts where id = ${checkoutId} and session_id = ${sessionId} for update`;
+    if (!c || !isCheckoutLive(c.status)) return; // settled meanwhile (webhook / another iPad)
+    await applyCheckoutState(tx, s, c, state, "square_api", actor);
+  });
+}
+
 /** Asks Square for the latest state of any live checkout on this session. */
 export async function syncCheckout(actor: Actor | null, id: string): Promise<void> {
-  await withTx(async (tx) => {
-    const s = await mustLock(tx, id);
-    const live = (await getCheckouts(tx, id)).filter((c) => isCheckoutLive(c.status));
-    for (const c of live) {
-      const state = await gateway.get(c.id);
-      await applyCheckoutState(tx, s, c, state, "square_api", actor);
-      // A completed checkout changes the session; re-read before the next one.
-      Object.assign(s, (await lockSession(tx, id)) ?? {});
-    }
-  });
+  if (!UUID_RE.test(id)) throw notFound("Session not found.");
+  const q = db();
+  const [exists] = await q<{ id: string }[]>`select id from public.sessions where id = ${id}`;
+  if (!exists) throw notFound("Session not found.");
+  const live = await q<{ id: string }[]>`
+    select id from public.terminal_checkouts
+    where session_id = ${id} and status in ('PENDING', 'IN_PROGRESS', 'CANCEL_REQUESTED')
+    order by attempt`;
+  for (const c of live) await reconcileCheckout(c.id, id, actor);
 }
 
 /**
@@ -546,35 +580,45 @@ export async function syncCheckout(actor: Actor | null, id: string): Promise<voi
  * view is served). Throttled by last_synced_at so several iPads don't all hit Square.
  */
 export async function syncStaleCheckouts(limit = 3): Promise<void> {
+  // Covers every live checkout, whether or not its bill is still on a table (bills charged from
+  // the Unpaid list, or marked paid while the Terminal was still cancelling).
+  // Claim the rows atomically by stamping last_synced_at first: concurrent callers (three iPads
+  // polling) skip each other's rows, and a failing Square call can't make us retry the same
+  // checkout on every poll.
   const rows = await db()<{ id: string; session_id: string }[]>`
-    select id, session_id from public.terminal_checkouts
-    where status in ('PENDING', 'IN_PROGRESS', 'CANCEL_REQUESTED')
-      and created_at < now() - interval '8 seconds'
-      and (last_synced_at is null or last_synced_at < now() - interval '15 seconds')
-    order by last_synced_at nulls first
-    limit ${limit}`;
+    update public.terminal_checkouts set last_synced_at = now()
+    where id in (
+      select id from public.terminal_checkouts
+      where status in ('PENDING', 'IN_PROGRESS', 'CANCEL_REQUESTED')
+        and created_at < now() - interval '8 seconds'
+        and (last_synced_at is null or last_synced_at < now() - interval '15 seconds')
+      order by last_synced_at nulls first
+      limit ${limit}
+      for update skip locked
+    )
+    returning id, session_id`;
   for (const r of rows) {
     try {
-      await withTx(async (tx) => {
-        const s = await lockSession(tx, r.session_id);
-        if (!s) return;
-        const [c] = await tx<CheckoutRow[]>`
-          select * from public.terminal_checkouts where id = ${r.id} for update`;
-        if (!c || !isCheckoutLive(c.status)) return;
-        if (c.last_synced_at && Date.now() - c.last_synced_at.getTime() < 15_000) return;
-        const state = await gateway.get(c.id);
-        await applyCheckoutState(tx, s, c, state, "square_api", null);
-      });
+      await reconcileCheckout(r.id, r.session_id, null);
     } catch (e) {
       console.warn("[square] background checkout sync failed", r.id, e instanceof Error ? e.message : e);
     }
   }
 }
 
+/** For `after()`: background reconciliation that can never throw (Square may be unconfigured). */
+export async function reconcileInBackground(): Promise<void> {
+  try {
+    await syncStaleCheckouts();
+  } catch (e) {
+    console.warn("[square] stale checkout sync skipped", e instanceof Error ? e.message : e);
+  }
+}
+
 /** Webhook entry point. Caller holds the transaction that also recorded the event id. */
 export async function applyWebhookCheckout(
   tx: Tx,
-  payload: { id: string; status: string; referenceId: string | null; cancelReason: string | null },
+  payload: { id: string; status: string; referenceId: string | null; cancelReason: string | null; amountCents?: number | null },
 ): Promise<"applied" | "unknown" | "ignored"> {
   if (!isCheckoutStatus(payload.status)) return "ignored";
 
@@ -587,19 +631,47 @@ export async function applyWebhookCheckout(
     sessionId = c?.session_id ?? null;
   }
   const s = sessionId ? await lockSession(tx, sessionId) : null;
-  const [row] = s
+  let [row] = s
     ? await tx<CheckoutRow[]>`
         select * from public.terminal_checkouts where id = ${payload.id} and session_id = ${s.id} for update`
     : [];
+
+  if (s && !row) {
+    // Square created this checkout (reference_id is our session) but the transaction that sent it
+    // never committed — e.g. Square answered after our timeout. Adopt it so its outcome counts:
+    // a completed payment must settle the bill (or be flagged if the bill was paid another way).
+    const amount = payload.amountCents && payload.amountCents > 0 ? payload.amountCents : s.total_cents;
+    if (amount && amount > 0) {
+      const attempt = s.checkout_attempt + 1;
+      [row] = await tx<CheckoutRow[]>`
+        insert into public.terminal_checkouts (id, session_id, attempt, amount_cents, status)
+        values (${payload.id}, ${s.id}, ${attempt}, ${amount}, 'PENDING')
+        returning *`;
+      await tx`
+        update public.sessions set checkout_attempt = ${attempt}, square_checkout_id = ${payload.id}
+        where id = ${s.id}`;
+      s.checkout_attempt = attempt;
+      s.square_checkout_id = payload.id;
+      await audit(tx, {
+        actorStaffId: null,
+        deviceLabel: "Square webhook",
+        action: "checkout.adopted",
+        entity: "session",
+        entityId: s.id,
+        after: { checkout_id: payload.id, attempt, amount_cents: amount, square_status: payload.status },
+        reason: "Square created this card request but the app hadn't recorded it (Square answered slowly). Recorded now from Square's webhook.",
+      });
+    }
+  }
 
   if (!s || !row) {
     await audit(tx, {
       actorStaffId: null,
       deviceLabel: "Square webhook",
       action: "webhook.unknown_checkout",
-      entity: "square_checkout",
-      entityId: payload.id,
-      after: { status: payload.status, reference_id: payload.referenceId },
+      entity: s ? "session" : "square_checkout",
+      entityId: s ? s.id : payload.id,
+      after: { checkout_id: payload.id, status: payload.status, reference_id: payload.referenceId },
     });
     console.warn("[square] webhook for unknown checkout", payload.id, payload.status);
     return "unknown";
@@ -682,14 +754,15 @@ export async function voidSession(
   now = new Date(),
 ): Promise<{ kind: "voided" } | { kind: "already_paid_by_card" }> {
   const reason = requireReason(reasonIn);
-  return withTx(async (tx) => {
+  const result = await withTx<{ kind: "voided" } | { kind: "already_paid_by_card" } | Refused>(async (tx) => {
     const s = await mustLock(tx, id);
     assertCan(s.status, "void");
     if (s.status === "awaiting_payment") {
       const live = await cancelLiveCheckouts(tx, s, actor);
       if (live.completed) return { kind: "already_paid_by_card" } as const;
       if (live.cancelPending || live.warnings.length) {
-        throw conflict("A card request is still on the Terminal. Cancel it there first, then void.");
+        // Return (not throw) so the cancel already sent to Square is recorded.
+        return { kind: "refused", message: "A card request is still on the Terminal. Cancel it there first, then void." } as const;
       }
     }
     await closeOpenInterval(tx, id, now);
@@ -711,6 +784,8 @@ export async function voidSession(
     });
     return { kind: "voided" } as const;
   });
+  if (result.kind === "refused") throw conflict(result.message);
+  return result;
 }
 
 export async function reversePaid(actor: Actor, manager: Manager, id: string, reasonIn: string): Promise<void> {

@@ -27,7 +27,8 @@ export function checkoutLabel(session: SessionDTO): { label: string; tone: Check
   if (!status) return { label: "Not charged yet", tone: "muted" };
   if (status === "CANCEL_REQUESTED") return { label: "Cancelling on Terminal…", tone: "warn" };
   if (status === "CANCELED") return { label: "Card not completed", tone: "warn" };
-  if (status === "COMPLETED") return { label: "Card approved, confirming…", tone: "info" };
+  // A COMPLETED checkout on a bill that is still awaiting payment only happens after a manager reversed it.
+  if (status === "COMPLETED") return { label: "Card payment was reversed — take payment again", tone: "warn" };
   if (isCheckoutLive(status)) return { label: "Sent to Terminal", tone: "info" };
   return { label: "Not charged yet", tone: "muted" };
 }

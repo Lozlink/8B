@@ -17,12 +17,12 @@ export function SettingsTab({ state, reload, onError }: TabProps) {
   const [open, setOpen] = useState(false);
 
   const valid =
-    WHOLE.test(rounding) && Number(rounding) >= 1 && WHOLE.test(grace) && WHOLE.test(minimum) && /^([01]\d|2[0-3]):[0-5]\d$/.test(dayStart);
+    WHOLE.test(rounding) && Number(rounding) >= 1 && WHOLE.test(grace) && WHOLE.test(minimum) && /^([01]\d|2[0-3]):[0-5]\d(:[0-5]\d)?$/.test(dayStart);
   const dirty =
     Number(rounding) !== s.roundingMinutes ||
     Number(grace) !== s.graceMinutes ||
     Number(minimum) !== s.minimumMinutes ||
-    dayStart !== s.businessDayStart;
+    dayStart.slice(0, 5) !== s.businessDayStart;
 
   return (
     <div className="flex max-w-xl flex-col gap-4">
@@ -54,7 +54,7 @@ export function SettingsTab({ state, reload, onError }: TabProps) {
               roundingMinutes: Number(rounding),
               graceMinutes: Number(grace),
               minimumMinutes: Number(minimum),
-              businessDayStart: dayStart,
+              businessDayStart: dayStart.slice(0, 5),
               reason,
             });
             await reload();

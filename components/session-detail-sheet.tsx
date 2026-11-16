@@ -36,7 +36,7 @@ type Dialog = "edit" | "void" | "reverse" | null;
 export function SessionDetailSheet({ sessionId, onClose, onCharge }: Props) {
   const router = useRouter();
   const toast = useToast();
-  const { floor, refetch } = useFloor();
+  const { floor, refetch, version } = useFloor();
   const nowMs = useServerNow();
   const [detail, setDetail] = useState<SessionDetailDTO | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -56,7 +56,8 @@ export function SessionDetailSheet({ sessionId, onClose, onCharge }: Props) {
     }
   }, [sessionId, router]);
 
-  useLoad(load);
+  // Reload on open and whenever the floor refreshes (another iPad or a manager may have changed it).
+  useLoad(load, version);
 
   const changed = async () => {
     await load();
@@ -80,6 +81,14 @@ export function SessionDetailSheet({ sessionId, onClose, onCharge }: Props) {
         )
       ) : (
         <div className="flex flex-col gap-6">
+          {error ? (
+            <Notice tone="warn">
+              <span className="block">Couldn&apos;t refresh, so this may be out of date. {error}</span>
+              <Button className="mt-2" onClick={() => void load()}>
+                Retry
+              </Button>
+            </Notice>
+          ) : null}
           {alreadyCard ? (
             <Notice tone="danger" strong>
               Card payment already went through — this bill is paid. Don&apos;t take cash.
@@ -262,35 +271,39 @@ function Breakdown({ detail, nowMs }: { detail: SessionDetailDTO; nowMs: number 
   const { floor } = useFloor();
   const s = detail.session;
   const live = s.status === "running" || s.status === "paused";
+  // Running/paused: the server price is a snapshot from fetch time, so show the live client estimate.
   const est = live && floor ? estimate(s, floor.pricing, nowMs) : null;
   const b = detail.breakdown;
-  const lines = b?.lines ?? est?.lines ?? [];
-  const total = b ? b.totalCents : est ? est.totalCents : s.totalCents;
-  const minutes = b ? b.billedMinutes : est ? est.billedMinutes : s.billedMinutes;
-  const gst = b ? b.gstCents : est ? est.gstCents : total !== null ? gstOf(total) : null;
-  const isEstimate = !b && !!est;
+  // Closed: the stored figures are the bill.
+  const total = live ? (est ? est.totalCents : null) : (s.totalCents ?? b?.totalCents ?? null);
+  const minutes = live ? (est ? est.billedMinutes : null) : (s.billedMinutes ?? b?.billedMinutes ?? null);
+  const lines = live ? (est?.lines ?? []) : b && b.totalCents === total ? b.lines : [];
+  const gst = total !== null ? gstOf(total) : null;
+  const isEstimate = live;
   return (
     <Section title={isEstimate ? "Price (estimate)" : "Price"}>
-      {lines.length === 0 && total === null ? (
+      {total === null ? (
         <p className="text-muted">No price yet.</p>
       ) : (
         <div className="rounded-xl border border-line">
-          <ul className="divide-y divide-line">
-            {lines.map((l) => (
-              <li key={l.rateCardId} className="flex justify-between gap-3 px-4 py-3">
-                <span>
-                  {l.rateCardName} <span className="text-muted">· {l.minutes} min @ {formatCents(l.centsPerHour)}/h</span>
-                </span>
-                <span className="tabular-nums">{formatCents(l.cents)}</span>
-              </li>
-            ))}
-          </ul>
-          <div className="flex justify-between gap-3 border-t border-line bg-bg px-4 py-3 text-lg font-semibold">
+          {lines.length > 0 ? (
+            <ul className="divide-y divide-line">
+              {lines.map((l) => (
+                <li key={l.rateCardId} className="flex justify-between gap-3 px-4 py-3">
+                  <span>
+                    {l.rateCardName} <span className="text-muted">· {l.minutes} min @ {formatCents(l.centsPerHour)}/h</span>
+                  </span>
+                  <span className="tabular-nums">{formatCents(l.cents)}</span>
+                </li>
+              ))}
+            </ul>
+          ) : null}
+          <div className="flex justify-between gap-3 border-t border-line bg-bg px-4 py-3 text-lg font-semibold first:border-t-0">
             <span>
               Total{isEstimate ? " est." : ""}
               {minutes !== null ? <span className="font-normal text-muted"> · {minutes} min</span> : null}
             </span>
-            <span className="tabular-nums">{total !== null ? formatCents(total) : "—"}</span>
+            <span className="tabular-nums">{formatCents(total)}</span>
           </div>
           {gst !== null ? (
             <p className="px-4 pb-3 text-sm text-muted">

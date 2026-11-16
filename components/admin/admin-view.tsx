@@ -78,7 +78,7 @@ export function AdminView() {
     );
   }
 
-  if (phase.kind === "locked") return <Gate onUnlocked={() => void load()} />;
+  if (phase.kind === "locked") return <Gate onUnlocked={load} loadError={loadError} />;
 
   const tabProps = { state: phase.state, reload: load, onError };
 
@@ -131,7 +131,7 @@ export function AdminView() {
   );
 }
 
-function Gate({ onUnlocked }: { onUnlocked: () => void }) {
+function Gate({ onUnlocked, loadError }: { onUnlocked: () => Promise<void>; loadError: string | null }) {
   const router = useRouter();
   const [pin, setPin] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -143,7 +143,9 @@ function Gate({ onUnlocked }: { onUnlocked: () => void }) {
     setError(null);
     try {
       await api.adminElevate(pin);
-      onUnlocked();
+      await onUnlocked();
+      setPin("");
+      setPending(false);
     } catch (e) {
       const dest = authRedirect(e);
       if (dest) router.replace(dest);
@@ -160,7 +162,7 @@ function Gate({ onUnlocked }: { onUnlocked: () => void }) {
         <p className="text-muted">Admin stays unlocked for 10 minutes.</p>
       </div>
       <PinDots value={pin} />
-      {error ? <Notice tone="danger">{error}</Notice> : null}
+      {error ?? loadError ? <Notice tone="danger">{error ?? loadError}</Notice> : null}
       <PinPad compact value={pin} onChange={setPin} onSubmit={() => void submit()} disabled={pending} />
     </section>
   );

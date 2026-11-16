@@ -101,7 +101,7 @@ export function FloorProvider({ children }: { children: ReactNode }) {
           const dest = authRedirect(e);
           if (dest) {
             router.replace(dest);
-          } else if (e instanceof ApiError && e.status === 0) {
+          } else if (e instanceof ApiError && (e.status === 0 || e.status >= 500)) {
             failuresRef.current += 1;
             setFailures(failuresRef.current);
           }
@@ -127,21 +127,29 @@ export function FloorProvider({ children }: { children: ReactNode }) {
   // Initial load + who am I.
   useLoad(refetch);
   useLoad(syncTime);
+  const meLoaded = me !== null;
   useEffect(() => {
+    if (meLoaded) return;
     let cancelled = false;
-    api
-      .me()
-      .then((r) => {
-        if (!cancelled) setMe(r.me);
-      })
-      .catch((e: unknown) => {
-        const dest = authRedirect(e);
-        if (dest) router.replace(dest);
-      });
+    let retry: ReturnType<typeof setTimeout> | undefined;
+    const attempt = () => {
+      api
+        .me()
+        .then((r) => {
+          if (!cancelled) setMe(r.me);
+        })
+        .catch((e: unknown) => {
+          const dest = authRedirect(e);
+          if (dest) router.replace(dest);
+          else if (!cancelled) retry = setTimeout(attempt, 4000);
+        });
+    };
+    attempt();
     return () => {
       cancelled = true;
+      clearTimeout(retry);
     };
-  }, [router]);
+  }, [router, meLoaded]);
 
   // Server clock offset every 5 minutes.
   useEffect(() => {

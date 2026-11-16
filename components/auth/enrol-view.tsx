@@ -20,6 +20,8 @@ export function EnrolView() {
   const [pin2, setPin2] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [attempt, setAttempt] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
@@ -35,15 +37,12 @@ export function EnrolView() {
         setReady(true);
       })
       .catch((e: unknown) => {
-        if (!cancelled) {
-          setError(errorMessage(e));
-          setReady(true);
-        }
+        if (!cancelled) setLoadError(errorMessage(e));
       });
     return () => {
       cancelled = true;
     };
-  }, [router]);
+  }, [router, attempt]);
 
   const pinsOk = !setupNeeded || (PIN_RE.test(pin1) && pin1 === pin2 && mgrName.trim().length > 0);
   const canSubmit = code.trim().length > 0 && label.trim().length > 0 && pinsOk && !pending;
@@ -60,11 +59,30 @@ export function EnrolView() {
       });
       router.replace("/login");
     } catch (e) {
-      setError(errorMessage(e));
+      const message = errorMessage(e);
+      // The server says a first manager is needed: reveal those fields.
+      if (/first manager/i.test(message)) setSetupNeeded(true);
+      setError(message);
       setPending(false);
     }
   };
 
+  if (loadError) {
+    return (
+      <div className="flex w-full max-w-md flex-col gap-3">
+        <Notice tone="danger">{loadError}</Notice>
+        <Button
+          size="lg"
+          onClick={() => {
+            setLoadError(null);
+            setAttempt((n) => n + 1);
+          }}
+        >
+          Try again
+        </Button>
+      </div>
+    );
+  }
   if (!ready) return <Spinner />;
 
   return (
