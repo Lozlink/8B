@@ -11,6 +11,7 @@
  *   409 conflict / invalid_transition / pricing_*  → show message, refetch floor
  *   429 too_many_attempts     → show message
  *   502 square_error          → Square unreachable/refused; show message (staff can fall back to Mark paid)
+ *   503 square_not_configured → Square env not set on the server; show message (use Square POS + Mark paid)
  */
 import type {
   AdminStateDTO,

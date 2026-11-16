@@ -1,7 +1,7 @@
 import "server-only";
 import { SquareClient, SquareEnvironment, SquareError, SquareTimeoutError } from "square";
-import { env } from "@/lib/server/env";
-import { upstream } from "@/lib/server/errors";
+import { squareEnv } from "@/lib/server/env";
+import { AppError, upstream } from "@/lib/server/errors";
 
 let client: SquareClient | null = null;
 
@@ -12,7 +12,7 @@ let client: SquareClient | null = null;
  */
 export function square(): SquareClient {
   if (!client) {
-    const e = env();
+    const e = squareEnv();
     client = new SquareClient({
       token: e.SQUARE_ACCESS_TOKEN,
       environment: e.SQUARE_ENVIRONMENT === "production" ? SquareEnvironment.Production : SquareEnvironment.Sandbox,
@@ -34,7 +34,8 @@ export function isSquareStatus(e: unknown, status: number): boolean {
 }
 
 /** Converts SDK errors into a message staff can act on. */
-export function toUpstreamError(e: unknown, what: string) {
+export function toUpstreamError(e: unknown, what: string): AppError {
+  if (e instanceof AppError) return e; // e.g. square_not_configured — already staff-readable
   if (e instanceof SquareTimeoutError) {
     return upstream(`Square didn't answer in time while trying to ${what}. Check the Terminal, then try again.`);
   }

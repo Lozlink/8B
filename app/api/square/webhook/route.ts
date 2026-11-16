@@ -1,5 +1,5 @@
 import { withTx } from "@/lib/server/db";
-import { env } from "@/lib/server/env";
+import { webhookEnv } from "@/lib/server/env";
 import { applyDevicePaired } from "@/lib/server/admin";
 import { applyWebhookCheckout } from "@/lib/server/sessions";
 import { deviceCodePayload, terminalCheckoutPayload, verifySquareSignature, webhookEnvelope } from "@/lib/square/webhook";
@@ -17,12 +17,14 @@ export const maxDuration = 30;
  */
 export async function POST(req: Request): Promise<Response> {
   const raw = await req.text();
-  const e = env();
+  const w = webhookEnv();
+  // Not configured → 503, so Square keeps retrying (up to 24 h) instead of us dropping events.
+  if (!w) return new Response("webhook not configured", { status: 503 });
   const signed = verifySquareSignature({
     rawBody: raw,
     signatureHeader: req.headers.get("x-square-hmacsha256-signature"),
-    signatureKey: e.SQUARE_WEBHOOK_SIGNATURE_KEY,
-    notificationUrl: e.SQUARE_WEBHOOK_URL,
+    signatureKey: w.SQUARE_WEBHOOK_SIGNATURE_KEY,
+    notificationUrl: w.SQUARE_WEBHOOK_URL,
   });
   if (!signed) return new Response("invalid signature", { status: 401 });
 

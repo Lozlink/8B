@@ -170,7 +170,8 @@ export interface AdminStateDTO {
   settings: AdminSettingsDTO;
   staff: AdminStaffDTO[];
   devices: AdminDeviceDTO[];
-  squareEnvironment: "sandbox" | "production";
+  /** null when Square isn't configured on the server. */
+  squareEnvironment: "sandbox" | "production" | null;
 }
 
 export interface PairingCodeDTO {

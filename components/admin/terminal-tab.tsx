@@ -44,6 +44,12 @@ export function TerminalTab({ state, reload, onError }: TabProps) {
   return (
     <div className="flex max-w-xl flex-col gap-4">
       <TabHeader title="Square Terminal" />
+      {state.squareEnvironment === null ? (
+        <Notice tone="warn">
+          Square isn&rsquo;t configured on the server, so Charge card and pairing are off. Staff can still ring up in
+          Square POS and use Mark paid.
+        </Notice>
+      ) : null}
       {sandbox ? (
         <Notice tone="warn">Square is in sandbox mode. Pairing a real Terminal only works in production.</Notice>
       ) : null}

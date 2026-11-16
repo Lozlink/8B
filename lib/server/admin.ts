@@ -6,7 +6,7 @@ import { randomUUID } from "node:crypto";
 import { assertPinUnique, hashPin, type Actor, type Manager } from "./auth";
 import { audit } from "./audit";
 import { db, withTx, type Tx } from "./db";
-import { env } from "./env";
+import { squareEnv, squareEnvironmentOrNull } from "./env";
 import { badRequest, conflict, notFound } from "./errors";
 import { getSettings, mapRateCard, type RateCardRow } from "./repo";
 
@@ -71,7 +71,7 @@ export async function getAdminState(manager: Manager): Promise<AdminStateDTO> {
       lastSeenAt: d.last_seen_at?.toISOString() ?? null,
       revokedAt: d.revoked_at?.toISOString() ?? null,
     })),
-    squareEnvironment: env().SQUARE_ENVIRONMENT,
+    squareEnvironment: squareEnvironmentOrNull(),
   };
 }
 
@@ -404,7 +404,7 @@ export async function revokeDevice(actor: Actor, m: Manager, id: string, reason:
 
 export async function startPairing(actor: Actor, m: Manager): Promise<PairingCodeDTO> {
   const code = await squareTerminal.createDeviceCode(
-    env().SQUARE_LOCATION_ID,
+    squareEnv().SQUARE_LOCATION_ID,
     `8 Ball Lounge timer (${actor.deviceLabel})`,
     randomUUID(),
   );
@@ -469,7 +469,13 @@ export async function applyDevicePaired(
   dc: { id: string; status: string; deviceId: string | null; locationId: string | null; productType?: string },
 ): Promise<"applied" | "ignored"> {
   if (dc.status !== "PAIRED" || !dc.deviceId) return "ignored";
-  if (dc.locationId && dc.locationId !== env().SQUARE_LOCATION_ID) return "ignored";
+  let locationId: string;
+  try {
+    locationId = squareEnv().SQUARE_LOCATION_ID;
+  } catch {
+    return "ignored"; // Square not configured: we can't tell whether this code is ours
+  }
+  if (dc.locationId && dc.locationId !== locationId) return "ignored";
   if (dc.productType && dc.productType !== "TERMINAL_API") return "ignored";
   await saveTerminalDevice(tx, dc.deviceId, "square_webhook", null, null);
   return "applied";
