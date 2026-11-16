@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { ActionDialog } from "@/components/action-dialog";
+import { ItemsPanel } from "@/components/items-panel";
 import { Badge, Button, Notice, Sheet, Spinner } from "@/components/ui";
 import { useToast } from "@/components/toast";
 import { api } from "@/lib/client/api";
@@ -12,7 +13,8 @@ import { useFloor } from "@/lib/client/floor-context";
 import { useAction } from "@/lib/client/use-action";
 import { isCheckoutLive } from "@/lib/domain/machine";
 import type { SessionDetailDTO } from "@/lib/domain/types";
-import { formatCents, gstOf } from "@/lib/pricing";
+import { formatCents } from "@/lib/pricing";
+import { billOf, groupItems } from "@/lib/client/bill-view";
 import { checkoutLabel, sessionTableNames } from "@/lib/client/session-view";
 
 const ALREADY_PAID = "Card payment already went through — this bill is paid. Don't take cash.";
@@ -188,6 +190,8 @@ export function ChargeSheet({ sessionId, onClose }: Props) {
 
           <Total detail={detail} />
 
+          {session && session.status === "awaiting_payment" && mode === "choose" ? <ItemsPanel session={session} reload={load} /> : null}
+
           {session && session.status === "paid" ? (
             <PaidPanel detail={detail} onClose={onClose} />
           ) : session && session.status === "void" ? (
@@ -214,10 +218,7 @@ export function ChargeSheet({ sessionId, onClose }: Props) {
             />
           ) : mode === "cash" ? (
             <div className="flex flex-col gap-4">
-              <Notice tone="info" strong>
-                Ring &lsquo;Table hire&rsquo; for {formatCents(session?.totalCents ?? detail.breakdown?.totalCents ?? 0)} as Cash in
-                Square POS — the drawer will open. Then tap Mark paid – cash.
-              </Notice>
+              <CashInstruction detail={detail} />
               <Button variant="primary" size="lg" disabled={pending || stale} onClick={() => void handleCash()}>
                 {pending ? "Saving…" : "Mark paid – cash"}
               </Button>
@@ -232,7 +233,12 @@ export function ChargeSheet({ sessionId, onClose }: Props) {
                 <Notice tone="warn">Card payment was reversed — take payment again.</Notice>
               ) : null}
               {floor && !floor.terminalPaired ? (
-                <Notice tone="warn">No Terminal is paired. Ring it up in Square POS, then tap Mark paid – card.</Notice>
+                <Notice tone="warn">
+                  No Terminal is paired. {session && session.items.length > 0
+                    ? `Ring up ${(billOf(detail)?.tableCents ?? 0) > 0 ? "Table hire and " : ""}the items in Square POS`
+                    : "Ring it up in Square POS"}, then tap
+                  Mark paid – card.
+                </Notice>
               ) : null}
               <Button
                 variant="primary"
@@ -260,6 +266,7 @@ export function ChargeSheet({ sessionId, onClose }: Props) {
 
       {confirmCard ? (
         <CardConfirmDialog
+          hasItems={(session?.items.length ?? 0) > 0}
           onClose={() => setConfirmCard(false)}
           onConfirm={async () => {
             const r = await api.markPaid(sessionId, "card", true);
@@ -277,18 +284,25 @@ export function ChargeSheet({ sessionId, onClose }: Props) {
 function Total({ detail }: { detail: SessionDetailDTO }) {
   const s = detail.session;
   const b = detail.breakdown;
-  // The stored bill is authoritative once stopped; the breakdown is only a fallback while running.
-  const total = s.totalCents ?? b?.totalCents ?? null;
+  // The stored bill is authoritative once stopped; the breakdown (table time only) is a fallback.
+  const bill = billOf(detail);
   const minutes = s.billedMinutes ?? b?.billedMinutes ?? null;
-  const lines = b && b.totalCents === total ? b.lines : [];
+  const lines = b && bill && b.totalCents === bill.tableCents ? b.lines : [];
+  const groups = groupItems(s.items);
   return (
     <section aria-label="Bill" className="rounded-2xl border border-line bg-bg p-4 text-center">
-      <p className="text-6xl font-bold tabular-nums">{total !== null ? formatCents(total) : "—"}</p>
+      <p className="text-6xl font-bold tabular-nums">{bill ? formatCents(bill.totalCents) : "—"}</p>
       <p className="mt-2 text-lg text-muted">
         {minutes !== null ? `${minutes} min billed` : "Minutes pending"}
-        {total !== null ? ` · GST incl. ${formatCents(gstOf(total))}` : ""}
+        {bill ? ` · GST incl. ${formatCents(bill.gstCents)}` : ""}
       </p>
-      {lines.length > 0 ? (
+      {bill && groups.length > 0 ? (
+        <p className="mt-1 text-lg text-muted">
+          Table <span className="tabular-nums">{formatCents(bill.tableCents)}</span> · Items{" "}
+          <span className="tabular-nums">{formatCents(bill.itemsCents)}</span>
+        </p>
+      ) : null}
+      {lines.length > 0 || groups.length > 0 ? (
         <ul className="mt-3 divide-y divide-line border-t border-line text-left text-base">
           {lines.map((l) => (
             <li key={l.rateCardId} className="flex justify-between gap-3 py-2">
@@ -298,9 +312,59 @@ function Total({ detail }: { detail: SessionDetailDTO }) {
               <span className="tabular-nums">{formatCents(l.cents)}</span>
             </li>
           ))}
+          {groups.map((g) => (
+            <li key={g.key} className="flex justify-between gap-3 py-2">
+              <span>
+                {g.quantity} × {g.name}
+                {!g.taxed ? <span className="text-muted"> · GST-free</span> : null}
+              </span>
+              <span className="tabular-nums">{formatCents(g.cents)}</span>
+            </li>
+          ))}
         </ul>
       ) : null}
     </section>
+  );
+}
+
+/** What to ring into Square POS for a cash sale: table hire at the table amount, then each item. */
+function CashInstruction({ detail }: { detail: SessionDetailDTO }) {
+  const bill = billOf(detail);
+  const groups = groupItems(detail.session.items);
+  if (!bill) return null;
+  if (groups.length === 0) {
+    return (
+      <Notice tone="info" strong>
+        Ring &lsquo;Table hire&rsquo; for {formatCents(bill.tableCents)} as Cash in Square POS — the drawer will open. Then tap Mark
+        paid – cash.
+      </Notice>
+    );
+  }
+  return (
+    <Notice tone="info">
+      <p className="text-lg font-semibold">Ring these up as Cash in Square POS:</p>
+      <ul className="mt-2 divide-y divide-[#3a77b0]/40 text-lg">
+        {bill.tableCents > 0 ? (
+          <li className="flex justify-between gap-3 py-1.5">
+            <span>Table hire</span>
+            <span className="tabular-nums">{formatCents(bill.tableCents)}</span>
+          </li>
+        ) : null}
+        {groups.map((g) => (
+          <li key={g.key} className="flex justify-between gap-3 py-1.5">
+            <span>
+              {g.name} × {g.quantity}
+            </span>
+            <span className="tabular-nums">{formatCents(g.cents)}</span>
+          </li>
+        ))}
+        <li className="flex justify-between gap-3 py-1.5 font-semibold">
+          <span>Total</span>
+          <span className="tabular-nums">{formatCents(bill.totalCents)}</span>
+        </li>
+      </ul>
+      <p className="mt-2 text-lg font-semibold">The drawer will open. Then tap Mark paid – cash.</p>
+    </Notice>
   );
 }
 
@@ -363,7 +427,15 @@ function PaidPanel({ detail, onClose }: { detail: SessionDetailDTO; onClose: () 
   );
 }
 
-function CardConfirmDialog({ onClose, onConfirm }: { onClose: () => void; onConfirm: () => Promise<void> }) {
+function CardConfirmDialog({
+  hasItems,
+  onClose,
+  onConfirm,
+}: {
+  hasItems: boolean;
+  onClose: () => void;
+  onConfirm: () => Promise<void>;
+}) {
   const [checked, setChecked] = useState(false);
   return (
     <ActionDialog
@@ -371,7 +443,11 @@ function CardConfirmDialog({ onClose, onConfirm }: { onClose: () => void; onConf
       noReason
       submitLabel="Mark paid"
       canSubmit={checked}
-      description="The card payment must already show as APPROVED on the Terminal or in Square."
+      description={
+        hasItems
+          ? "The card payment must already show as APPROVED on the Terminal or in Square. If it was rung up in Square POS, the items must be on it too."
+          : "The card payment must already show as APPROVED on the Terminal or in Square."
+      }
       onSubmit={onConfirm}
       onClose={onClose}
     >

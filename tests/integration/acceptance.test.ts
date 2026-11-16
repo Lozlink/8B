@@ -63,7 +63,7 @@ describe("section 10 acceptance", () => {
     expect(sum.businessDate).toBe("2026-11-20");
     expect(sum.paid.card).toEqual({ count: 1, cents: 3542 });
     expect(sum.paid.cash).toEqual({ count: 0, cents: 0 });
-    expect(sum.sessions).toEqual({ count: 1, billedMinutes: 85, billedCents: 3542 });
+    expect(sum.sessions).toEqual({ count: 1, billedMinutes: 85, billedCents: 3542, tableCents: 3542, itemsCents: 0 });
     expect(sum.unpaid.count).toBe(0);
     expect(sum.paidItems[0]).toMatchObject({ id, method: "card", via: "square_webhook", tableNames: "Table 2 → Table 5", totalCents: 3542 });
 

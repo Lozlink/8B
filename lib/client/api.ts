@@ -48,7 +48,9 @@ function isErrorBody(v: unknown): v is { error: { code: string; message: string;
 }
 
 async function call<T>(method: "GET" | "POST", path: string, body?: unknown): Promise<T> {
-  // A hung request must not freeze the UI: GETs give up after 8 s, POSTs after 35 s (routes cap at 30 s).
+  // A hung request must not freeze the UI: GETs give up after 8 s, POSTs after 35 s. Most routes cap at
+  // 30 s; session actions may run to 60 s when Square is slow, and the server finishes the work
+  // even if we stop waiting.
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), method === "GET" ? 8000 : 35000);
   let res: Response;
@@ -141,6 +143,15 @@ export const api = {
   markPaid: (id: string, method: SettledMethod, cardConfirmed = false) =>
     post<WithWarnings<MarkPaidOutcome>>(`/api/sessions/${enc(id)}/mark-paid`, { method, cardConfirmed }),
 
+  /**
+   * Puts `quantity` (1–99) of a product on the bill at the product's current price. Allowed while
+   * running, paused or awaiting payment; 409 if a card request is live on the Terminal.
+   */
+  addItem: (id: string, productId: string, quantity = 1) =>
+    post<{ ok: true }>(`/api/sessions/${enc(id)}/add-item`, { productId, quantity }),
+  /** Takes one item line off the bill (the record is kept). Same rules as addItem. */
+  removeItem: (id: string, itemId: string) => post<{ ok: true }>(`/api/sessions/${enc(id)}/remove-item`, { itemId }),
+
   // Manager actions: manager PIN + reason travel with the request.
   void: (id: string, managerPin: string, reason: string) =>
     post<{ kind: "voided" } | { kind: "already_paid_by_card" }>(`/api/sessions/${enc(id)}/void`, { managerPin, reason }),
@@ -204,6 +215,12 @@ export const api = {
       | { op: "create"; name: string; role: StaffRole; pin: string; reason: string }
       | { op: "update"; id: string; name?: string; role?: StaffRole; active?: boolean; pin?: string; reason: string },
   ) => post<{ ok: true }>("/api/admin/staff", body),
+
+  /** Re-reads the item list from Square now. 502/503 if Square can't be reached or isn't configured. */
+  adminSyncProducts: () => post<{ count: number }>("/api/admin/products", { op: "sync" }),
+  /** Turns itemised Square charges on or off. */
+  adminItemise: (enabled: boolean, reason: string) =>
+    post<{ ok: true }>("/api/admin/products", { op: "itemise", enabled, reason }),
 
   adminRevokeDevice: (id: string, reason: string) => post<{ ok: true }>("/api/admin/devices", { op: "revoke", id, reason }),
 

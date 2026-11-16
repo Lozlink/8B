@@ -1,6 +1,7 @@
 import { after } from "next/server";
 import { requireActor } from "@/lib/server/auth";
 import { handler, ok } from "@/lib/server/http";
+import { refreshProductsInBackground } from "@/lib/server/items";
 import { getFloor } from "@/lib/server/queries";
 import { reconcileInBackground } from "@/lib/server/sessions";
 
@@ -14,5 +15,8 @@ export const GET = handler(async () => {
   // cheap, filters itself and throttles per checkout, so it runs on every poll. Never delays the
   // floor view.
   after(reconcileInBackground);
+  // Keeps the item list in step with Square: at most one catalogue read every 10 minutes, however
+  // many iPads are polling. It writes only to tables with no floor-broadcast trigger.
+  after(refreshProductsInBackground);
   return ok(floor);
 });

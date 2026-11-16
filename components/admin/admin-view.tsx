@@ -11,6 +11,7 @@ import { authRedirect, errorMessage, isManagerRequired } from "@/lib/client/erro
 import type { AdminStateDTO } from "@/lib/domain/types";
 import { AuditTab } from "./audit-tab";
 import { DevicesTab } from "./devices-tab";
+import { ItemsTab } from "./items-tab";
 import { RatesTab } from "./rates-tab";
 import { SettingsTab } from "./settings-tab";
 import { StaffTab } from "./staff-tab";
@@ -20,6 +21,7 @@ import { TerminalTab } from "./terminal-tab";
 const TABS = [
   { id: "tables", label: "Tables" },
   { id: "rates", label: "Rate cards" },
+  { id: "items", label: "Items" },
   { id: "settings", label: "Settings" },
   { id: "staff", label: "Staff" },
   { id: "devices", label: "Devices" },
@@ -121,6 +123,7 @@ export function AdminView() {
       <div id="admin-panel" role="tabpanel" aria-labelledby={`tab-${tab}`}>
         {tab === "tables" ? <TablesTab {...tabProps} /> : null}
         {tab === "rates" ? <RatesTab {...tabProps} /> : null}
+        {tab === "items" ? <ItemsTab {...tabProps} /> : null}
         {tab === "settings" ? <SettingsTab {...tabProps} /> : null}
         {tab === "staff" ? <StaffTab {...tabProps} /> : null}
         {tab === "devices" ? <DevicesTab {...tabProps} /> : null}

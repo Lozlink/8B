@@ -4,12 +4,14 @@ import { notFound } from "@/lib/server/errors";
 import { handler, ok, readJson } from "@/lib/server/http";
 import { managerAction, uuid } from "@/lib/server/schemas";
 import {
+  addItem,
   cancelCheckout,
   chargeCard,
   editTimes,
   markPaid,
   pauseSession,
   releaseTable,
+  removeItem,
   resendCheckout,
   resumeSession,
   reversePaid,
@@ -19,7 +21,9 @@ import {
   voidSession,
 } from "@/lib/server/sessions";
 
-export const maxDuration = 30;
+// A resend can make three Square calls in a row under the bill's lock (cancel, order, checkout).
+// Each has its own timeout; 60 s leaves room for all three to run slow and still answer.
+export const maxDuration = 60;
 
 const transferBody = z.object({ tableId: uuid });
 const markPaidBody = z.object({ method: z.enum(["card", "cash"]), cardConfirmed: z.boolean().default(false) });
@@ -30,6 +34,8 @@ const editBody = managerAction.extend({
     .min(1)
     .max(50),
 });
+const addItemBody = z.object({ productId: z.string().min(1).max(200), quantity: z.number().int().min(1).max(99).default(1) });
+const removeItemBody = z.object({ itemId: uuid });
 
 const OK = { ok: true as const };
 
@@ -66,6 +72,16 @@ export const POST = handler(async (req: Request, ctx: RouteContext<"/api/session
     case "mark-paid": {
       const b = await readJson(req, markPaidBody);
       return ok(await markPaid(actor, id, b.method, { cardConfirmed: b.cardConfirmed }));
+    }
+    case "add-item": {
+      const b = await readJson(req, addItemBody);
+      await addItem(actor, id, b.productId, b.quantity);
+      return ok(OK);
+    }
+    case "remove-item": {
+      const b = await readJson(req, removeItemBody);
+      await removeItem(actor, id, b.itemId);
+      return ok(OK);
     }
     case "void": {
       const b = await readJson(req, managerAction);

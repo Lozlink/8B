@@ -60,6 +60,7 @@ export async function POST(req: Request): Promise<Response> {
           referenceId: c.reference_id ?? null,
           cancelReason: c.cancel_reason ?? null,
           amountCents: c.amount_money?.amount ?? null,
+          orderId: c.order_id ?? null,
         });
       } else if (event.type === "device.code.paired") {
         const p = deviceCodePayload.safeParse(object);

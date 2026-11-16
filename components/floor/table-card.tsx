@@ -4,6 +4,7 @@ import { Badge, Button, type Tone } from "@/components/ui";
 import { can, STATUS_LABEL } from "@/lib/domain/machine";
 import type { PricingConfigDTO, SessionDTO, TableDTO } from "@/lib/domain/types";
 import { formatClock } from "@/lib/format";
+import { itemCount, itemsLabel } from "@/lib/client/bill-view";
 import { checkoutLabel, estimate } from "@/lib/client/session-view";
 import { formatCents } from "@/lib/pricing";
 
@@ -58,9 +59,12 @@ export function TableCard({ table, session, pricing, nowMs, busy, actions }: Pro
       >
         <span className="text-5xl font-semibold leading-none tabular-nums">{est ? formatClock(est.actualMs) : "—"}</span>
         <span className="mt-2 text-lg text-muted">
-          <span className="tabular-nums">{est ? formatCents(est.totalCents) : "—"}</span> est.
+          <span className="tabular-nums">{est ? formatCents(est.totalCents + session.itemsCents) : "—"}</span> est.
           {status === "paused" ? <span className="ml-2 font-semibold text-info">Clock stopped</span> : null}
         </span>
+        {session.items.length > 0 ? (
+          <span className="mt-0.5 text-base text-muted">incl. {itemsLabel(itemCount(session.items))}</span>
+        ) : null}
       </button>
     );
   } else {
@@ -77,6 +81,7 @@ export function TableCard({ table, session, pricing, nowMs, busy, actions }: Pro
         </span>
         <span className="mt-2 text-lg text-muted">
           {session.billedMinutes !== null ? `${session.billedMinutes} min billed` : "Total pending"}
+          {session.items.length > 0 ? ` · ${itemsLabel(itemCount(session.items))}` : ""}
         </span>
         <span className={`mt-1 text-base font-semibold ${SUB_TONE[sub.tone]}`}>{sub.label}</span>
       </button>

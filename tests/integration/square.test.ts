@@ -36,7 +36,7 @@ describe("11. chargeCard", () => {
 
     expect(h.gateway.creates).toHaveLength(1);
     expect(h.gateway.creates[0]).toMatchObject({
-      idempotencyKey: `${id}-a1`,
+      idempotencyKey: `${id}-a1i`,
       amountCents: 2500,
       deviceId: "DEVICE_TEST",
       referenceId: id,
@@ -91,7 +91,7 @@ describe("12. Square failure rolls back", () => {
     expect(retry.kind).toBe("sent");
     expect(h.gateway.creates).toHaveLength(2);
     expect(h.gateway.creates[1].idempotencyKey).toBe(h.gateway.creates[0].idempotencyKey);
-    expect(h.gateway.creates[1].idempotencyKey).toBe(`${id}-a1`);
+    expect(h.gateway.creates[1].idempotencyKey).toBe(`${id}-a1i`);
     expect((await getSession(h, id)).checkout_attempt).toBe(1);
   });
 });
@@ -147,7 +147,7 @@ describe("13. webhook completion", () => {
     // and the bill can be charged again with a fresh attempt
     const again = await chargeCard(h.staff.actor, id);
     expect(again.kind).toBe("sent");
-    expect(h.gateway.creates[1].idempotencyKey).toBe(`${id}-a2`);
+    expect(h.gateway.creates[1].idempotencyKey).toBe(`${id}-a2i`);
   });
 
   it("an unrecognised status is ignored", async () => {
@@ -273,7 +273,7 @@ describe("17. resendCheckout", () => {
     const out = await resendCheckout(h.staff.actor, id);
     expect(out).toMatchObject({ kind: "sent", checkoutId: "chk_2", amountCents: 2500 });
     expect(h.gateway.cancels).toEqual(["chk_1"]);
-    expect(h.gateway.creates.map((c) => c.idempotencyKey)).toEqual([`${id}-a1`, `${id}-a2`]);
+    expect(h.gateway.creates.map((c) => c.idempotencyKey)).toEqual([`${id}-a1i`, `${id}-a2i`]);
     const cos = await getCheckouts(h, id);
     expect(cos.map((c) => [c.attempt, c.status])).toEqual([
       [1, "CANCELED"],

@@ -36,6 +36,31 @@ export interface CheckoutDTO {
   updatedAt: string;
 }
 
+/** A fixed-price item from the Square catalogue that can go on a bill. `id` is the Square variation id. */
+export interface ProductDTO {
+  id: string;
+  name: string;
+  priceCents: number;
+  /** false = GST-free (the Square item has no tax attached). */
+  taxed: boolean;
+  category: string | null;
+}
+
+/** An item on a bill. Name, price and GST flag were copied when it was added. */
+export interface SessionItemDTO {
+  id: string;
+  productId: string;
+  name: string;
+  unitCents: number;
+  quantity: number;
+  taxed: boolean;
+  addedAt: string;
+  addedByName: string;
+  /** Set once the item has been taken off the bill (the row is kept). */
+  removedAt: string | null;
+  removedByName: string | null;
+}
+
 export interface SessionDTO {
   id: string;
   status: SessionStatus;
@@ -44,7 +69,12 @@ export interface SessionDTO {
   openedByName: string;
   closedAt: string | null;
   billedMinutes: number | null;
+  /** The whole bill once the session is stopped: table time + itemsCents. Null while running. */
   totalCents: number | null;
+  /** Sum of the items currently on the bill (0 if none). Valid in every status. */
+  itemsCents: number;
+  /** Items currently on the bill, oldest first. Removed items are only in SessionDetailDTO. */
+  items: SessionItemDTO[];
   settledMethod: SettledMethod | null;
   settledVia: SettledVia | null;
   settledAt: string | null;
@@ -70,12 +100,20 @@ export interface FloorDTO {
   unpaidOffTableCount: number;
   pricing: PricingConfigDTO;
   terminalPaired: boolean;
+  /** Items staff can put on a bill (active products, in display order). Empty if none are synced. */
+  products: ProductDTO[];
 }
 
 export interface SessionDetailDTO {
   session: SessionDTO;
   checkouts: CheckoutDTO[];
+  /**
+   * TABLE TIME ONLY: `totalCents` and `gstCents` here exclude items. The whole bill is
+   * `breakdown.totalCents + session.itemsCents` (see lib/domain/bill.ts).
+   */
   breakdown: { billedMinutes: number; totalCents: number; gstCents: number; actualMs: number; lines: PriceLine[] } | null;
+  /** Items that were taken off this bill, oldest first. */
+  removedItems: SessionItemDTO[];
   audit: AuditEntryDTO[];
 }
 
@@ -97,7 +135,10 @@ export interface SummaryDTO {
   businessDate: string; // YYYY-MM-DD (local)
   from: string;
   to: string;
-  sessions: { count: number; billedMinutes: number; billedCents: number };
+  /** billedCents is the whole bill; tableCents + itemsCents = billedCents. */
+  sessions: { count: number; billedMinutes: number; billedCents: number; tableCents: number; itemsCents: number };
+  /** Items on the bills counted in `sessions` (closed in the window, not void), biggest first. */
+  itemsSold: { productId: string; name: string; quantity: number; cents: number }[];
   paid: { card: { count: number; cents: number }; cash: { count: number; cents: number } };
   /** Every session settled in the window (for "Reverse paid", manager only). */
   paidItems: (SummarySessionRow & { method: SettledMethod; via: SettledVia; settledAt: string; settledByName: string | null })[];
@@ -161,10 +202,28 @@ export interface AdminSettingsDTO {
   /** "HH:MM" local */
   businessDayStart: string;
   terminalDeviceId: string | null;
+  /** Send charges to Square as an itemised order (true) or as a single amount (false). */
+  itemiseCharges: boolean;
+}
+
+export interface AdminProductDTO extends ProductDTO {
+  /** false = no longer in the Square catalogue (kept so old bills still resolve). */
+  active: boolean;
+}
+
+export interface AdminCatalogDTO {
+  products: AdminProductDTO[];
+  /** ISO; null = never synced. */
+  syncedAt: string | null;
+  /** true when Square has a variable-price "Table hire" item to report table time against. */
+  tableHireLinked: boolean;
+  /** Why the last refresh from Square failed, if it did. */
+  lastError: string | null;
 }
 
 export interface AdminStateDTO {
   manager: { id: string; name: string };
+  catalog: AdminCatalogDTO;
   tables: TableDTO[];
   rateCards: AdminRateCardDTO[];
   settings: AdminSettingsDTO;

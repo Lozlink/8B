@@ -4,17 +4,20 @@ import { useCallback, useState } from "react";
 import { useRouter } from "next/navigation";
 import { ActionDialog } from "@/components/action-dialog";
 import { EditTimesDialog } from "@/components/edit-times-dialog";
+import { ItemsPanel } from "@/components/items-panel";
 import { useToast } from "@/components/toast";
 import { Badge, Button, Notice, Sheet, Spinner, type Tone } from "@/components/ui";
 import { api } from "@/lib/client/api";
 import { useLoad } from "@/lib/client/use-load";
 import { authRedirect, errorMessage } from "@/lib/client/errors";
 import { useFloor, useServerNow } from "@/lib/client/floor-context";
+import { billOf } from "@/lib/client/bill-view";
 import { checkoutLabel, estimate, sessionTableNames } from "@/lib/client/session-view";
 import { can, STATUS_LABEL } from "@/lib/domain/machine";
 import type { SessionDetailDTO } from "@/lib/domain/types";
 import { formatDateTime, formatTime } from "@/lib/format";
-import { formatCents, gstOf } from "@/lib/pricing";
+import { itemCents } from "@/lib/domain/bill";
+import { formatCents } from "@/lib/pricing";
 
 const STATUS_TONE: Record<string, Tone> = {
   running: "running",
@@ -129,7 +132,30 @@ export function SessionDetailSheet({ sessionId, onClose, onCharge }: Props) {
             </ul>
           </Section>
 
+          <ItemsPanel session={s} reload={load} />
+
           <Breakdown detail={detail} nowMs={nowMs} />
+
+          {detail.removedItems.length > 0 ? (
+            <Section title="Removed items">
+              <ul className="divide-y divide-line rounded-xl border border-line">
+                {detail.removedItems.map((i) => (
+                  <li key={i.id} className="px-4 py-3">
+                    <p className="flex flex-wrap justify-between gap-x-3">
+                      <span className="text-muted line-through">
+                        {i.quantity} × {i.name}
+                      </span>
+                      <span className="tabular-nums text-muted line-through">{formatCents(itemCents(i))}</span>
+                    </p>
+                    <p className="text-sm text-muted">
+                      Added by {i.addedByName} at {formatTime(i.addedAt, tz)}
+                      {i.removedAt ? ` · removed ${i.removedByName ? `by ${i.removedByName} ` : ""}at ${formatTime(i.removedAt, tz)}` : ""}
+                    </p>
+                  </li>
+                ))}
+              </ul>
+            </Section>
+          ) : null}
 
           {detail.checkouts.length > 0 ? (
             <Section title="Card attempts">
@@ -274,19 +300,19 @@ function Breakdown({ detail, nowMs }: { detail: SessionDetailDTO; nowMs: number 
   // Running/paused: the server price is a snapshot from fetch time, so show the live client estimate.
   const est = live && floor ? estimate(s, floor.pricing, nowMs) : null;
   const b = detail.breakdown;
-  // Closed: the stored figures are the bill.
-  const total = live ? (est ? est.totalCents : null) : (s.totalCents ?? b?.totalCents ?? null);
+  // Table time only. Closed: the stored bill (minus items) is authoritative.
+  const bill = live ? (est ? billOf(detail, est.totalCents) : null) : billOf(detail);
   const minutes = live ? (est ? est.billedMinutes : null) : (s.billedMinutes ?? b?.billedMinutes ?? null);
-  const lines = live ? (est?.lines ?? []) : b && b.totalCents === total ? b.lines : [];
-  const gst = total !== null ? gstOf(total) : null;
+  const lines = live ? (est?.lines ?? []) : b && bill && b.totalCents === bill.tableCents ? b.lines : [];
   const isEstimate = live;
+  const hasItems = s.items.length > 0;
   return (
     <Section title={isEstimate ? "Price (estimate)" : "Price"}>
-      {total === null ? (
+      {!bill ? (
         <p className="text-muted">No price yet.</p>
       ) : (
         <div className="rounded-xl border border-line">
-          {lines.length > 0 ? (
+          {lines.length > 0 || hasItems ? (
             <ul className="divide-y divide-line">
               {lines.map((l) => (
                 <li key={l.rateCardId} className="flex justify-between gap-3 px-4 py-3">
@@ -296,6 +322,18 @@ function Breakdown({ detail, nowMs }: { detail: SessionDetailDTO; nowMs: number 
                   <span className="tabular-nums">{formatCents(l.cents)}</span>
                 </li>
               ))}
+              {lines.length === 0 && hasItems ? (
+                <li className="flex justify-between gap-3 px-4 py-3">
+                  <span>Table time</span>
+                  <span className="tabular-nums">{formatCents(bill.tableCents)}</span>
+                </li>
+              ) : null}
+              {hasItems ? (
+                <li className="flex justify-between gap-3 px-4 py-3">
+                  <span>Items</span>
+                  <span className="tabular-nums">{formatCents(bill.itemsCents)}</span>
+                </li>
+              ) : null}
             </ul>
           ) : null}
           <div className="flex justify-between gap-3 border-t border-line bg-bg px-4 py-3 text-lg font-semibold first:border-t-0">
@@ -303,13 +341,11 @@ function Breakdown({ detail, nowMs }: { detail: SessionDetailDTO; nowMs: number 
               Total{isEstimate ? " est." : ""}
               {minutes !== null ? <span className="font-normal text-muted"> · {minutes} min</span> : null}
             </span>
-            <span className="tabular-nums">{formatCents(total)}</span>
+            <span className="tabular-nums">{formatCents(bill.totalCents)}</span>
           </div>
-          {gst !== null ? (
-            <p className="px-4 pb-3 text-sm text-muted">
-              Includes GST of <span className="tabular-nums">{formatCents(gst)}</span>
-            </p>
-          ) : null}
+          <p className="px-4 pb-3 text-sm text-muted">
+            Includes GST of <span className="tabular-nums">{formatCents(bill.gstCents)}</span>
+          </p>
         </div>
       )}
     </Section>

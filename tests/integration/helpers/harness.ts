@@ -7,8 +7,9 @@ import postgres from "postgres";
 import { hashSync } from "bcryptjs";
 import { setDbForTests } from "@/lib/server/db";
 import type { Actor, Manager } from "@/lib/server/auth";
+import { setCatalogGatewayForTests } from "@/lib/server/items";
 import { setTerminalGatewayForTests } from "@/lib/server/sessions";
-import { FakeGateway } from "./fake-gateway";
+import { FakeCatalog, FakeGateway } from "./fake-gateway";
 
 // Server env the admin/queries modules read lazily (never contacts Square).
 const TEST_ENV: Record<string, string> = {
@@ -28,6 +29,7 @@ const read = (f: string) => readFileSync(resolve(MIGRATIONS, f), "utf8");
 
 export const INIT_SQL = read("20261116000000_init.sql");
 export const REFERENCE_SQL = read("20261116000100_reference_data.sql");
+export const SESSION_ITEMS_SQL = read("20261117000000_session_items.sql");
 
 export interface TestStaff {
   /** Plain staff member acting on the Counter iPad. */
@@ -41,6 +43,8 @@ export interface Harness {
   pg: PGlite;
   sql: postgres.Sql;
   gateway: FakeGateway;
+  /** Stand-in for the Square catalogue. */
+  catalog: FakeCatalog;
   staff: TestStaff;
   /** Table id by name, e.g. "Table 2". */
   tableId(name: string): string;
@@ -74,6 +78,8 @@ export async function bootHarness(): Promise<Harness> {
   `);
   await pg.exec(INIT_SQL);
   await pg.exec(REFERENCE_SQL);
+  // Later migrations run against a database that already holds the reference data, as in production.
+  await pg.exec(SESSION_ITEMS_SQL);
 
   const server = new PGLiteSocketServer({ db: pg, port: 0, host: "127.0.0.1" });
   await server.start();
@@ -97,6 +103,8 @@ export async function bootHarness(): Promise<Harness> {
 
   const gateway = new FakeGateway();
   setTerminalGatewayForTests(gateway);
+  const catalog = new FakeCatalog();
+  setCatalogGatewayForTests(catalog);
 
   const raw: Harness["raw"] = async (role, text) => {
     await pg.exec("reset role");
@@ -115,6 +123,7 @@ export async function bootHarness(): Promise<Harness> {
     pg,
     sql,
     gateway,
+    catalog,
     staff: undefined as unknown as TestStaff,
     tableId(name: string) {
       const id = tableIds.get(name);
@@ -127,9 +136,10 @@ export async function bootHarness(): Promise<Harness> {
         // Replica mode skips the no-delete triggers; this is test setup only.
         await pg.exec(`
           set session_replication_role = replica;
-          truncate public.audit_log, public.webhook_events, public.terminal_checkouts,
-            public.session_intervals, public.sessions, public.login_attempts, public.devices,
+          truncate public.audit_log, public.webhook_events, public.terminal_checkouts, public.session_items,
+            public.session_intervals, public.sessions, public.products, public.login_attempts, public.devices,
             public.rate_cards, public.tables, public.settings, public.staff restart identity cascade;
+          update public.catalog_state set synced_at = null, table_hire_variation_id = null, last_error = null;
           set session_replication_role = origin;
         `);
         await pg.exec(REFERENCE_SQL);
@@ -155,6 +165,7 @@ export async function bootHarness(): Promise<Harness> {
         await pg.exec("set role timer_app");
       }
       gateway.reset();
+      catalog.reset();
     },
   } as unknown as Harness;
   h.raw = raw;

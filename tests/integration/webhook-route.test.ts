@@ -101,6 +101,23 @@ describe("terminal.checkout.updated", () => {
     expect((await getCheckouts(h, id))[0].status).toBe("COMPLETED");
   });
 
+  it("an orphan itemised checkout is adopted with its order id and amount read from the payload", async () => {
+    const id = await awaitingPayment(h);
+    const res = await deliver({
+      event_id: "evt_orphan",
+      type: "terminal.checkout.updated",
+      data: {
+        object: {
+          checkout: { id: "chk_orphan", status: "PENDING", reference_id: id, order_id: "ord_sq", amount_money: { amount: 2500, currency: "AUD" } },
+        },
+      },
+    });
+    expect(res.status).toBe(200);
+    const rows = await h.sql<{ id: string; amount_cents: number; square_order_id: string | null }[]>`
+      select id, amount_cents, square_order_id from public.terminal_checkouts where session_id = ${id}`;
+    expect(rows).toEqual([{ id: "chk_orphan", amount_cents: 2500, square_order_id: "ord_sq" }]);
+  });
+
   it("an unknown checkout is 200 (no retry storm), recorded, and audited", async () => {
     expect((await deliver(checkoutEvent("evt_u", "chk_ghost", "COMPLETED", null))).status).toBe(200);
     expect(await events()).toHaveLength(1);

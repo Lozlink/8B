@@ -58,3 +58,39 @@ export async function occupiedTables(h: Harness): Promise<string[]> {
     select t.name from public.sessions s join public.tables t on t.id = s.current_table_id order by t.name`;
   return rows.map((r) => r.name);
 }
+
+export interface SeedProduct {
+  id: string;
+  name: string;
+  priceCents: number;
+  taxed?: boolean;
+  category?: string | null;
+  active?: boolean;
+  sortOrder?: number;
+}
+
+/** Puts a product straight into `products`, as a catalogue sync would have. */
+export async function seedProduct(h: Harness, p: SeedProduct): Promise<string> {
+  await h.sql`
+    insert into public.products (id, item_id, name, price_cents, taxed, category, sort_order, active)
+    values (${p.id}, ${`ITEM_${p.id}`}, ${p.name}, ${p.priceCents}, ${p.taxed ?? true}, ${p.category ?? null},
+            ${p.sortOrder ?? 0}, ${p.active ?? true})`;
+  return p.id;
+}
+
+export interface ItemRow {
+  id: string;
+  session_id: string;
+  product_id: string;
+  name: string;
+  unit_cents: number;
+  quantity: number;
+  taxed: boolean;
+  added_by: string;
+  removed_at: Date | null;
+  removed_by: string | null;
+}
+
+export async function getItems(h: Harness, sessionId: string): Promise<ItemRow[]> {
+  return h.sql<ItemRow[]>`select * from public.session_items where session_id = ${sessionId} order by added_at, id`;
+}

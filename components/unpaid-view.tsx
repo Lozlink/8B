@@ -8,6 +8,7 @@ import { api } from "@/lib/client/api";
 import { useLoad } from "@/lib/client/use-load";
 import { authRedirect, errorMessage } from "@/lib/client/errors";
 import { useFloor } from "@/lib/client/floor-context";
+import { itemCount, itemsLabel } from "@/lib/client/bill-view";
 import { checkoutLabel, sessionSpan, sessionTableNames } from "@/lib/client/session-view";
 import type { SessionDTO } from "@/lib/domain/types";
 import { formatDateTime, formatTime } from "@/lib/format";
@@ -63,6 +64,7 @@ export function UnpaidView() {
                       {span.start ? formatDateTime(span.start, tz) : "—"}
                       {span.end ? ` – ${formatTime(span.end, tz)}` : ""}
                       {s.billedMinutes !== null ? ` · ${s.billedMinutes} min` : ""}
+                      {s.items.length > 0 ? ` · ${itemsLabel(itemCount(s.items))}` : ""}
                     </span>
                     <span
                       className={`text-base font-semibold ${sub.tone === "warn" ? "text-warn" : sub.tone === "info" ? "text-info" : "text-muted"}`}

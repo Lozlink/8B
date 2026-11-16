@@ -86,7 +86,15 @@ export function SummaryView() {
 
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
             <Stat title="Sessions closed" big={String(data.sessions.count)} sub={`${data.sessions.billedMinutes} min (${dur(data.sessions.billedMinutes)}) billed`} />
-            <Stat title="Billed" big={formatCents(data.sessions.billedCents)} sub="GST included" />
+            <Stat
+              title="Billed"
+              big={formatCents(data.sessions.billedCents)}
+              sub={
+                data.sessions.itemsCents > 0
+                  ? `Table ${formatCents(data.sessions.tableCents)} · Items ${formatCents(data.sessions.itemsCents)} · GST included`
+                  : "GST included"
+              }
+            />
             <Stat title="Paid by card" big={formatCents(data.paid.card.cents)} sub={`${data.paid.card.count} payment${data.paid.card.count === 1 ? "" : "s"}`} />
             <Stat title="Paid by cash" big={formatCents(data.paid.cash.cents)} sub={`${data.paid.cash.count} payment${data.paid.cash.count === 1 ? "" : "s"}`} />
             <Stat
@@ -128,6 +136,23 @@ export function SummaryView() {
           ) : null}
 
           <List title="Unpaid in this window" empty="None." rows={data.unpaid.items} tz={tz} onOpen={setDetailId} />
+
+          {data.itemsSold.length > 0 ? (
+            <section aria-label="Items sold" className="flex flex-col gap-2">
+              <h2 className="text-xl font-semibold">Items sold</h2>
+              <ul className="divide-y divide-line rounded-xl border border-line bg-surface">
+                {data.itemsSold.map((i) => (
+                  <li key={i.productId} className="flex items-center justify-between gap-3 px-4 py-3">
+                    <span className="min-w-0 truncate font-semibold">{i.name}</span>
+                    <span className="flex shrink-0 gap-4 tabular-nums">
+                      <span className="text-muted">× {i.quantity}</span>
+                      <span className="w-24 text-right">{formatCents(i.cents)}</span>
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            </section>
+          ) : null}
 
           <section aria-label="Voids" className="flex flex-col gap-2">
             <h2 className="text-xl font-semibold">Voids ({data.voids.count})</h2>

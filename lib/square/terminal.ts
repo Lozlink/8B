@@ -39,6 +39,8 @@ export interface CreateCheckoutInput {
   referenceId: string;
   /** Shown on the Terminal, ≤ 500 chars. */
   note: string;
+  /** Itemised charge: the Square order this checkout pays. `amountCents` must equal the order total. */
+  orderId?: string;
 }
 
 export async function createTerminalCheckout(input: CreateCheckoutInput): Promise<SquareCheckoutState> {
@@ -50,11 +52,14 @@ export async function createTerminalCheckout(input: CreateCheckoutInput): Promis
         amountMoney: { amount: BigInt(input.amountCents), currency: "AUD" },
         referenceId: input.referenceId,
         note: input.note.slice(0, 500),
+        ...(input.orderId ? { orderId: input.orderId } : {}),
         deviceOptions: {
           deviceId: input.deviceId,
           // No tipping on table hire; show the receipt screen (print/email/SMS on the Terminal).
           tipSettings: { allowTipping: false },
           skipReceiptScreen: false,
+          // With an order attached, list its lines on the Terminal before the buyer pays.
+          ...(input.orderId ? { showItemizedCart: true } : {}),
         },
       },
     });

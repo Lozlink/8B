@@ -11,6 +11,8 @@ import type { SettledMethod, SettledVia } from "@/lib/domain/types";
 export interface Settings extends PricingSettings {
   businessDayStartMinute: number;
   terminalDeviceId: string | null;
+  /** Send charges to Square as an itemised order rather than a single amount. */
+  itemiseCharges: boolean;
 }
 
 interface SettingsRow {
@@ -20,12 +22,13 @@ interface SettingsRow {
   timezone: string;
   business_day_start: string;
   terminal_device_id: string | null;
+  itemise_charges: boolean;
 }
 
 export async function getSettings(q: Db): Promise<Settings> {
   const [r] = await q<SettingsRow[]>`
     select rounding_minutes, grace_minutes, minimum_minutes, timezone,
-           business_day_start::text as business_day_start, terminal_device_id
+           business_day_start::text as business_day_start, terminal_device_id, itemise_charges
     from public.settings where id`;
   if (!r) throw new Error("settings row missing — run the reference-data migration");
   return {
@@ -35,6 +38,7 @@ export async function getSettings(q: Db): Promise<Settings> {
     timezone: r.timezone,
     businessDayStartMinute: parseLocalTime(r.business_day_start),
     terminalDeviceId: r.terminal_device_id,
+    itemiseCharges: r.itemise_charges,
   };
 }
 
@@ -99,7 +103,10 @@ export interface SessionRow {
   closed_at: Date | null;
   closed_by: string | null;
   billed_minutes: number | null;
+  /** The whole bill once closed: table time + items_cents. */
   total_cents: number | null;
+  /** Sum of the live (not removed) items on the bill. */
+  items_cents: number;
   rate_snapshot: RateSnapshot | null;
   settled_method: SettledMethod | null;
   settled_via: SettledVia | null;
@@ -131,6 +138,39 @@ export interface CheckoutRow {
   created_at: Date;
   updated_at: Date;
   last_synced_at: Date | null;
+  /** The Square order this attempt was itemised against; null = sent as a plain amount. */
+  square_order_id: string | null;
+}
+
+export interface SessionItemRow {
+  id: string;
+  session_id: string;
+  product_id: string;
+  name: string;
+  unit_cents: number;
+  quantity: number;
+  taxed: boolean;
+  added_by: string;
+  added_at: Date;
+  removed_at: Date | null;
+  removed_by: string | null;
+}
+
+export interface ProductRow {
+  id: string;
+  item_id: string;
+  name: string;
+  price_cents: number;
+  taxed: boolean;
+  category: string | null;
+  sort_order: number;
+  active: boolean;
+}
+
+export interface CatalogStateRow {
+  synced_at: Date | null;
+  table_hire_variation_id: string | null;
+  last_error: string | null;
 }
 
 /** Locks and returns a session row for the rest of the transaction. */
@@ -151,6 +191,29 @@ export async function getCheckouts(q: Db, sessionId: string): Promise<CheckoutRo
     select * from public.terminal_checkouts where session_id = ${sessionId} order by attempt`;
 }
 
+/** Items currently on the bill (not removed), oldest first. */
+export async function getLiveItems(q: Db, sessionId: string): Promise<SessionItemRow[]> {
+  return q<SessionItemRow[]>`
+    select id, session_id, product_id, name, unit_cents, quantity, taxed, added_by, added_at, removed_at, removed_by
+    from public.session_items where session_id = ${sessionId} and removed_at is null
+    order by added_at, id`;
+}
+
+export async function getProducts(q: Db, opts: { activeOnly: boolean }): Promise<ProductRow[]> {
+  return q<ProductRow[]>`
+    select id, item_id, name, price_cents, taxed, category, sort_order, active
+    from public.products
+    where ${opts.activeOnly ? q`active` : q`true`}
+    order by sort_order, name, id`;
+}
+
+export async function getCatalogState(q: Db): Promise<CatalogStateRow> {
+  const [r] = await q<CatalogStateRow[]>`
+    select synced_at, table_hire_variation_id, last_error from public.catalog_state where id`;
+  if (!r) throw new Error("catalog_state row missing — run the session-items migration");
+  return r;
+}
+
 /** The fields worth recording in the audit trail. */
 export function auditView(s: SessionRow) {
   return {
@@ -160,6 +223,7 @@ export function auditView(s: SessionRow) {
     closed_at: s.closed_at,
     billed_minutes: s.billed_minutes,
     total_cents: s.total_cents,
+    items_cents: s.items_cents,
     settled_method: s.settled_method,
     settled_via: s.settled_via,
     settled_by: s.settled_by,

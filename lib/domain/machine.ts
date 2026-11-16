@@ -25,9 +25,13 @@ export type SessionAction =
   | "mark_paid"
   | "void"
   | "reverse_paid"
-  | "edit_times";
+  | "edit_times"
+  | "add_item"
+  | "remove_item";
 
 const ALLOWED_FROM: Record<SessionAction, readonly SessionStatus[]> = {
+  add_item: ["running", "paused", "awaiting_payment"],
+  remove_item: ["running", "paused", "awaiting_payment"],
   pause: ["running"],
   resume: ["paused"],
   transfer: ["running", "paused"],
@@ -87,6 +91,8 @@ const ACTION_LABEL: Record<SessionAction, string> = {
   void: "void",
   reverse_paid: "reverse",
   edit_times: "edit the times of",
+  add_item: "add items to",
+  remove_item: "remove items from",
 };
 
 // ---------------------------------------------------------------------------

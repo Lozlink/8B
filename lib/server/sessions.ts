@@ -3,16 +3,21 @@ import { assertCan, isCheckoutLive, isCheckoutStatus, type CheckoutStatus } from
 import type { MarkPaidOutcome, SettledMethod } from "@/lib/domain/types";
 import { formatDuration, makeSnapshot, price, type PriceResult, type PricingInterval } from "@/lib/pricing";
 import { formatTime } from "@/lib/format";
+import * as orders from "@/lib/square/orders";
+import type { OrderLineInput } from "@/lib/square/orders";
 import * as terminal from "@/lib/square/terminal";
 import type { SquareCheckoutState } from "@/lib/square/terminal";
 import type { Actor, Manager } from "./auth";
 import { audit } from "./audit";
 import { db, withTx, type Db, type Tx } from "./db";
+import { squareEnv } from "./env";
 import { badRequest, conflict, notFound, AppError } from "./errors";
 import {
   auditView,
+  getCatalogState,
   getCheckouts,
   getIntervals,
+  getLiveItems,
   getPricingConfig,
   getSettings,
   lockSession,
@@ -20,7 +25,9 @@ import {
   tableNames,
   type CheckoutRow,
   type IntervalRow,
+  type SessionItemRow,
   type SessionRow,
+  type Settings,
 } from "./repo";
 
 // ---------------------------------------------------------------------------
@@ -31,12 +38,15 @@ export interface TerminalGateway {
   create: typeof terminal.createTerminalCheckout;
   get: typeof terminal.getTerminalCheckout;
   cancel: typeof terminal.cancelTerminalCheckout;
+  /** Orders API: the itemised order a checkout is charged against. */
+  createOrder: typeof orders.createOrder;
 }
 
 let gateway: TerminalGateway = {
   create: terminal.createTerminalCheckout,
   get: terminal.getTerminalCheckout,
   cancel: terminal.cancelTerminalCheckout,
+  createOrder: orders.createOrder,
 };
 
 export function setTerminalGatewayForTests(g: TerminalGateway): void {
@@ -57,6 +67,8 @@ async function mustLock(tx: Tx, id: string): Promise<SessionRow> {
   if (!s) throw notFound("Session not found.");
   return s;
 }
+
+const dollars = (cents: number) => `$${(cents / 100).toFixed(2)}`;
 
 const toPricing = (i: IntervalRow): PricingInterval => ({ startedAt: i.started_at, endedAt: i.ended_at });
 
@@ -80,7 +92,10 @@ async function lockFreeTable(tx: Tx, tableId: string): Promise<{ id: string; nam
   return { id: t.id, name: t.name };
 }
 
-/** Re-prices a closed session from the rates captured at stop, so the bill can't drift. */
+/**
+ * Re-prices a closed session's TABLE TIME from the rates captured at stop, so the bill can't drift.
+ * The whole bill is this plus `s.items_cents`.
+ */
 function repriceClosed(s: SessionRow, intervals: IntervalRow[]): PriceResult {
   if (!s.rate_snapshot) throw new Error(`session ${s.id} has no rate snapshot`);
   return price({
@@ -195,10 +210,12 @@ export async function stopSession(actor: Actor, id: string, now = new Date()): P
     const ps = pricingSettingsOf(settings);
     const result = price({ intervals: intervals.map(toPricing), rateCards, settings: ps, now });
     const snapshot = JSON.stringify(makeSnapshot(rateCards, ps, now));
+    // The bill is table time plus whatever was put on it. billed_minutes stays table time only.
+    const totalCents = result.totalCents + s.items_cents;
 
-    if (result.totalCents === 0) {
-      // Nothing to charge (zero time or inside the grace period). Close it as a no-charge void so
-      // the record, the times and the reason all stay visible in the daily summary.
+    if (totalCents === 0) {
+      // Nothing to charge (zero time or inside the grace period, and no items). Close it as a
+      // no-charge void so the record, the times and the reason all stay visible in the daily summary.
       const reason = "No charge — stopped within the grace period";
       await tx`
         update public.sessions set
@@ -221,7 +238,7 @@ export async function stopSession(actor: Actor, id: string, now = new Date()): P
     await tx`
       update public.sessions set
         status = 'awaiting_payment', closed_at = ${now}, closed_by = ${actor.staffId},
-        billed_minutes = ${result.billedMinutes}, total_cents = ${result.totalCents},
+        billed_minutes = ${result.billedMinutes}, total_cents = ${totalCents},
         rate_snapshot = ${snapshot}::text::jsonb
       where id = ${id}`;
     await audit(tx, {
@@ -234,11 +251,13 @@ export async function stopSession(actor: Actor, id: string, now = new Date()): P
         status: "awaiting_payment",
         actual_ms: result.actualMs,
         billed_minutes: result.billedMinutes,
-        total_cents: result.totalCents,
+        table_cents: result.totalCents,
+        items_cents: s.items_cents,
+        total_cents: totalCents,
         lines: result.lines,
       },
     });
-    return { status: "awaiting_payment", billedMinutes: result.billedMinutes, totalCents: result.totalCents };
+    return { status: "awaiting_payment", billedMinutes: result.billedMinutes, totalCents };
   });
 }
 
@@ -326,6 +345,26 @@ async function applyCheckoutState(
       before: auditView(s),
       after: { ...checkoutInfo, status: "paid", settled_method: "card", settled_via: source, settled_at: now },
     });
+    if (row.amount_cents !== s.total_cents) {
+      // The money was taken, so the bill is settled — but for a different amount. This is an older
+      // card request (one the app never recorded, or one that completed after being cancelled)
+      // being paid after the bill changed. Flag it so someone squares up the difference.
+      const billCents = s.total_cents ?? 0;
+      await audit(tx, {
+        ...base,
+        action: "payment.conflict",
+        after: {
+          ...checkoutInfo,
+          total_cents: s.total_cents,
+          difference_cents: billCents - row.amount_cents,
+        },
+        reason:
+          `The card payment was for ${dollars(row.amount_cents)} but the bill is ${dollars(billCents)}. ` +
+          (row.amount_cents < billCents
+            ? `Collect the other ${dollars(billCents - row.amount_cents)} from the customer.`
+            : `Refund ${dollars(row.amount_cents - billCents)} in Square.`),
+      });
+    }
     return true;
   }
 
@@ -418,13 +457,69 @@ function buildNote(tables: string[], billedMinutes: number, openedAt: Date, clos
   return [tables.join(" → "), formatDuration(billedMinutes * 60_000), times].join(" · ");
 }
 
-/** Prices, sends a new checkout attempt to the Terminal and records it. Caller holds the lock. */
-async function sendAttempt(tx: Tx, s: SessionRow, actor: Actor, deviceId: string): Promise<SquareCheckoutState> {
+/** Square has this idempotency key on file against a different request body. */
+function isKeyReused(e: unknown): boolean {
+  if (!(e instanceof AppError) || e.code !== "square_error") return false;
+  const codes = e.detail?.codes;
+  return Array.isArray(codes) && codes.includes("IDEMPOTENCY_KEY_REUSED");
+}
+
+type KeyConflict = { kind: "key_conflict" };
+
+const KEY_CONFLICT_MESSAGE =
+  "Square already has a card request for this bill that the app didn't record. Check the Terminal and cancel anything waiting there, then charge again.";
+
+/**
+ * Square refused the request outright (a 4xx). Timeouts, network failures, 5xx and rate limiting
+ * don't count: the request may still have gone through, or will if tried again.
+ */
+function isSquareRejection(e: unknown): e is AppError {
+  if (!(e instanceof AppError) || e.code !== "square_error") return false;
+  // A reused key means Square has already seen a different request for this attempt. That's not a
+  // verdict on this one, and whatever the earlier request created may still be live.
+  if (isKeyReused(e)) return false;
+  const status = e.detail?.status;
+  return typeof status === "number" && status >= 400 && status < 500 && status !== 408 && status !== 429;
+}
+
+/** The lines of the Square order for a bill: table time first, then each item as it sits on the bill. */
+function orderLines(tableCents: number, tableHireVariationId: string | null, note: string, items: SessionItemRow[]): OrderLineInput[] {
+  const lines: OrderLineInput[] = [];
+  if (tableCents > 0) {
+    lines.push({
+      uid: "table",
+      // Without a "Table hire" item in Square the line is ad hoc: still charged and taxed, just
+      // not reported against a catalogue item.
+      catalogObjectId: tableHireVariationId,
+      name: tableHireVariationId ? null : "Table hire",
+      quantity: 1,
+      basePriceCents: tableCents,
+      note,
+    });
+  }
+  for (const i of items) {
+    // The price copied onto the bill is what's charged, whatever the catalogue says today.
+    lines.push({ uid: i.id, catalogObjectId: i.product_id, name: null, quantity: i.quantity, basePriceCents: i.unit_cents, note: null });
+  }
+  return lines;
+}
+
+/**
+ * Prices, sends a new checkout attempt to the Terminal and records it. Caller holds the lock.
+ *
+ * Returns `key_conflict` (rather than throwing) when Square says an idempotency key was already used
+ * for a different request: nothing else is sent, the attempt number is skipped so the next try uses
+ * fresh keys, and the caller must let the transaction COMMIT before telling staff.
+ */
+async function sendAttempt(tx: Tx, s: SessionRow, actor: Actor, settings: Settings): Promise<SquareCheckoutState | KeyConflict> {
+  const deviceId = settings.terminalDeviceId;
+  if (!deviceId) throw conflict("No Terminal is paired.");
   const intervals = await getIntervals(tx, s.id);
   const r = repriceClosed(s, intervals);
-  if (r.totalCents !== s.total_cents || r.billedMinutes !== s.billed_minutes) {
+  const totalCents = r.totalCents + s.items_cents;
+  if (totalCents !== s.total_cents || r.billedMinutes !== s.billed_minutes) {
     await tx`
-      update public.sessions set total_cents = ${r.totalCents}, billed_minutes = ${r.billedMinutes}
+      update public.sessions set total_cents = ${totalCents}, billed_minutes = ${r.billedMinutes}
       where id = ${s.id}`;
     await audit(tx, {
       ...by(actor),
@@ -432,10 +527,10 @@ async function sendAttempt(tx: Tx, s: SessionRow, actor: Actor, deviceId: string
       entity: "session",
       entityId: s.id,
       before: { total_cents: s.total_cents, billed_minutes: s.billed_minutes },
-      after: { total_cents: r.totalCents, billed_minutes: r.billedMinutes },
+      after: { total_cents: totalCents, items_cents: s.items_cents, billed_minutes: r.billedMinutes },
     });
   }
-  if (r.totalCents <= 0) throw conflict("There's nothing to charge on this bill.");
+  if (totalCents <= 0) throw conflict("There's nothing to charge on this bill.");
 
   const attempt = s.checkout_attempt + 1;
   const tableIds = [...new Set(intervals.map((i) => i.table_id))];
@@ -448,21 +543,85 @@ async function sendAttempt(tx: Tx, s: SessionRow, actor: Actor, deviceId: string
     s.closed_at,
     tz,
   );
+  const request = { amountCents: totalCents, deviceId, referenceId: s.id, note };
 
-  // The Square call happens while we hold the row lock. If it fails, the transaction rolls back and
-  // the attempt number isn't consumed, so a retry reuses the same idempotency key and Square
-  // returns the checkout it may already have created instead of making a second one.
-  const co = await gateway.create({
-    idempotencyKey: `${s.id}-a${attempt}`,
-    amountCents: r.totalCents,
-    deviceId,
-    referenceId: s.id,
-    note,
-  });
+  // The Square calls happen while we hold the row lock. If one fails, the transaction rolls back and
+  // the attempt number isn't consumed, so a retry reuses the same idempotency keys and Square
+  // returns the order / checkout it may already have created instead of making a second one.
+  // The checkout key says which kind of request it was (`i` itemised, none plain, `p` plain after a
+  // refused itemised try), so switching itemising on or off between a timed-out charge and its retry
+  // can never present Square with a different body under a key it has seen.
+  let co: SquareCheckoutState | null = null;
+  let orderId: string | null = null;
+  let itemiseFailed = false;
+  let stage: "order" | "checkout" | "plain" = "order";
+
+  const keyConflict = async (): Promise<KeyConflict> => {
+    await tx`update public.sessions set checkout_attempt = ${attempt} where id = ${s.id}`;
+    await audit(tx, {
+      ...by(actor),
+      action: "checkout.key_conflict",
+      entity: "session",
+      entityId: s.id,
+      after: { attempt, stage, amount_cents: totalCents },
+      reason:
+        "Square had already seen a different card request under this attempt's key (an earlier try it answered too slowly, most likely). Nothing was sent; the next charge uses a new attempt number.",
+    });
+    return { kind: "key_conflict" };
+  };
+
+  if (settings.itemiseCharges) {
+    let createdOrderId: string | null = null;
+    try {
+      const { table_hire_variation_id: tableHireVariationId } = await getCatalogState(tx);
+      const order = await gateway.createOrder({
+        idempotencyKey: `${s.id}-o${attempt}`,
+        locationId: squareEnv().SQUARE_LOCATION_ID,
+        referenceId: s.id,
+        lines: orderLines(r.totalCents, tableHireVariationId, note, await getLiveItems(tx, s.id)),
+      });
+      createdOrderId = order.id;
+      if (order.totalCents !== totalCents) {
+        // Square would charge a different amount from the bill (a tax or price rule we don't
+        // know about). Charge nothing rather than the wrong amount.
+        throw conflict(
+          "Square's total for this bill doesn't match ours, so nothing was charged. A manager can turn off itemised charges in Admin → Items, or take the card in Square POS and mark it paid.",
+          { square_total_cents: order.totalCents, total_cents: totalCents, order_id: order.id },
+        );
+      }
+      stage = "checkout";
+      co = await gateway.create({ ...request, idempotencyKey: `${s.id}-a${attempt}i`, orderId: order.id });
+      orderId = order.id;
+    } catch (e) {
+      if (isKeyReused(e)) return keyConflict();
+      if (!isSquareRejection(e)) throw e;
+      // Itemising must never stop a payment: Square refused the itemised version, so send the
+      // same total as a plain amount instead.
+      itemiseFailed = true;
+      await audit(tx, {
+        ...by(actor),
+        action: "checkout.itemise_failed",
+        entity: "session",
+        entityId: s.id,
+        after: { attempt, stage, order_id: createdOrderId, amount_cents: totalCents, square: e.detail ?? null },
+        reason: e.message,
+      });
+    }
+  }
+
+  if (!co) {
+    stage = "plain";
+    try {
+      co = await gateway.create({ ...request, idempotencyKey: itemiseFailed ? `${s.id}-a${attempt}p` : `${s.id}-a${attempt}` });
+    } catch (e) {
+      if (isKeyReused(e)) return keyConflict();
+      throw e;
+    }
+  }
 
   const [row] = await tx<CheckoutRow[]>`
-    insert into public.terminal_checkouts (id, session_id, attempt, amount_cents, status, created_by)
-    values (${co.id}, ${s.id}, ${attempt}, ${r.totalCents}, 'PENDING', ${actor.staffId})
+    insert into public.terminal_checkouts (id, session_id, attempt, amount_cents, status, created_by, square_order_id)
+    values (${co.id}, ${s.id}, ${attempt}, ${totalCents}, 'PENDING', ${actor.staffId}, ${orderId})
     returning *`;
   await tx`
     update public.sessions set square_checkout_id = ${co.id}, checkout_attempt = ${attempt}
@@ -472,11 +631,11 @@ async function sendAttempt(tx: Tx, s: SessionRow, actor: Actor, deviceId: string
     action: "checkout.sent",
     entity: "session",
     entityId: s.id,
-    after: { checkout_id: co.id, attempt, amount_cents: r.totalCents, note },
+    after: { checkout_id: co.id, attempt, amount_cents: totalCents, note, order_id: orderId },
   });
   if (co.status !== "PENDING") {
     // Idempotent replay of a checkout that already moved on.
-    await applyCheckoutState(tx, { ...s, total_cents: r.totalCents }, row, co, "square_api", actor);
+    await applyCheckoutState(tx, { ...s, total_cents: totalCents }, row, co, "square_api", actor);
   }
   return co;
 }
@@ -485,8 +644,10 @@ export type ChargeOutcome =
   | { kind: "sent"; checkoutId: string; amountCents: number }
   | { kind: "already_paid_by_card" };
 
+type Refused = { kind: "refused"; message: string };
+
 export async function chargeCard(actor: Actor, id: string): Promise<ChargeOutcome> {
-  return withTx(async (tx) => {
+  const result = await withTx<ChargeOutcome | Refused>(async (tx) => {
     const s = await mustLock(tx, id);
     assertCan(s.status, "charge_card");
     const settings = await getSettings(tx);
@@ -497,13 +658,16 @@ export async function chargeCard(actor: Actor, id: string): Promise<ChargeOutcom
     if (checkouts.some((c) => isCheckoutLive(c.status))) {
       throw conflict("This bill is already on the Terminal. Cancel it or use Resend.");
     }
-    const co = await sendAttempt(tx, s, actor, settings.terminalDeviceId);
+    const co = await sendAttempt(tx, s, actor, settings);
+    // Return (not throw) so the skipped attempt number and its audit row commit.
+    if ("kind" in co) return { kind: "refused", message: KEY_CONFLICT_MESSAGE };
     if (co.status === "COMPLETED") return { kind: "already_paid_by_card" };
     return { kind: "sent", checkoutId: co.id, amountCents: co.amountCents };
   });
+  if (result.kind === "refused") throw conflict(result.message);
+  return result;
 }
 
-type Refused = { kind: "refused"; message: string };
 
 export async function resendCheckout(actor: Actor, id: string): Promise<ChargeOutcome> {
   const result = await withTx<ChargeOutcome | Refused>(async (tx) => {
@@ -524,7 +688,8 @@ export async function resendCheckout(actor: Actor, id: string): Promise<ChargeOu
       };
     }
     const fresh = await mustLock(tx, id);
-    const co = await sendAttempt(tx, fresh, actor, settings.terminalDeviceId);
+    const co = await sendAttempt(tx, fresh, actor, settings);
+    if ("kind" in co) return { kind: "refused", message: KEY_CONFLICT_MESSAGE };
     if (co.status === "COMPLETED") return { kind: "already_paid_by_card" };
     return { kind: "sent", checkoutId: co.id, amountCents: co.amountCents };
   });
@@ -631,7 +796,15 @@ export async function reconcileInBackground(): Promise<void> {
 /** Webhook entry point. Caller holds the transaction that also recorded the event id. */
 export async function applyWebhookCheckout(
   tx: Tx,
-  payload: { id: string; status: string; referenceId: string | null; cancelReason: string | null; amountCents?: number | null },
+  payload: {
+    id: string;
+    status: string;
+    referenceId: string | null;
+    cancelReason: string | null;
+    amountCents?: number | null;
+    /** The Square order the checkout pays, when it was sent itemised. */
+    orderId?: string | null;
+  },
 ): Promise<"applied" | "unknown" | "ignored"> {
   if (!isCheckoutStatus(payload.status)) return "ignored";
 
@@ -657,8 +830,8 @@ export async function applyWebhookCheckout(
     if (amount && amount > 0) {
       const attempt = s.checkout_attempt + 1;
       [row] = await tx<CheckoutRow[]>`
-        insert into public.terminal_checkouts (id, session_id, attempt, amount_cents, status)
-        values (${payload.id}, ${s.id}, ${attempt}, ${amount}, 'PENDING')
+        insert into public.terminal_checkouts (id, session_id, attempt, amount_cents, status, square_order_id)
+        values (${payload.id}, ${s.id}, ${attempt}, ${amount}, 'PENDING', ${payload.orderId ?? null})
         returning *`;
       await tx`
         update public.sessions set checkout_attempt = ${attempt}, square_checkout_id = ${payload.id}
@@ -671,7 +844,13 @@ export async function applyWebhookCheckout(
         action: "checkout.adopted",
         entity: "session",
         entityId: s.id,
-        after: { checkout_id: payload.id, attempt, amount_cents: amount, square_status: payload.status },
+        after: {
+          checkout_id: payload.id,
+          attempt,
+          amount_cents: amount,
+          square_status: payload.status,
+          order_id: payload.orderId ?? null,
+        },
         reason: "Square created this card request but the app hadn't recorded it (Square answered slowly). Recorded now from Square's webhook.",
       });
     }
@@ -692,6 +871,132 @@ export async function applyWebhookCheckout(
 
   await applyCheckoutState(tx, s, row, { status: payload.status, cancelReason: payload.cancelReason }, "square_webhook", null);
   return "applied";
+}
+
+// ---------------------------------------------------------------------------
+// Items on the bill
+// ---------------------------------------------------------------------------
+
+const MAX_LINES_PER_BILL = 100;
+const MAX_ITEMS_CENTS = 10_000_000; // $100,000 — far past any real bill; keeps the integer columns safe
+
+const CHECKOUT_LIVE_MESSAGE = "Cancel the card request on the Terminal before changing the bill.";
+
+/**
+ * Puts `quantity` of a product on the bill at the product's current price. The name, price and
+ * GST flag are copied onto the bill, so a later catalogue change can't alter it.
+ */
+export async function addItem(actor: Actor, id: string, productId: string, quantity: number): Promise<{ itemId: string }> {
+  if (!Number.isInteger(quantity) || quantity < 1 || quantity > 99) {
+    throw badRequest("Quantity must be between 1 and 99.");
+  }
+  return withTx(async (tx) => {
+    const s = await mustLock(tx, id);
+    assertCan(s.status, "add_item");
+    if ((await getCheckouts(tx, id)).some((c) => isCheckoutLive(c.status))) throw conflict(CHECKOUT_LIVE_MESSAGE);
+
+    const [product] = await tx<{ id: string; name: string; price_cents: number; taxed: boolean; active: boolean }[]>`
+      select id, name, price_cents, taxed, active from public.products where id = ${productId}`;
+    if (!product) throw notFound("That item isn't on the list.");
+    if (!product.active) throw conflict(`${product.name} isn't for sale any more. Pick something else.`);
+
+    const [lines] = await tx<{ n: number }[]>`
+      select count(*)::int as n from public.session_items where session_id = ${id} and removed_at is null`;
+    if ((lines?.n ?? 0) >= MAX_LINES_PER_BILL) {
+      throw conflict(`A bill can hold ${MAX_LINES_PER_BILL} lines at most. Take something off before adding more.`);
+    }
+
+    const cents = product.price_cents * quantity;
+    const itemsCents = s.items_cents + cents;
+    if (itemsCents > MAX_ITEMS_CENTS) throw conflict("That's more than one bill can hold.");
+    const closed = s.status === "awaiting_payment";
+    const totalCents = closed ? (s.total_cents ?? 0) + cents : s.total_cents;
+
+    const [item] = await tx<{ id: string }[]>`
+      insert into public.session_items (session_id, product_id, name, unit_cents, quantity, taxed, added_by)
+      values (${id}, ${product.id}, ${product.name}, ${product.price_cents}, ${quantity}, ${product.taxed}, ${actor.staffId})
+      returning id`;
+    if (closed) {
+      // The bill is already totalled, so the total moves with it. Skip an attempt number so the
+      // new amount can never reuse an idempotency key Square has seen.
+      await tx`
+        update public.sessions set items_cents = ${itemsCents}, total_cents = ${totalCents},
+          checkout_attempt = checkout_attempt + 1
+        where id = ${id}`;
+    } else {
+      await tx`update public.sessions set items_cents = ${itemsCents} where id = ${id}`;
+    }
+    await audit(tx, {
+      ...by(actor),
+      action: "session.add_item",
+      entity: "session",
+      entityId: id,
+      before: { items_cents: s.items_cents, total_cents: s.total_cents },
+      after: {
+        item_id: item.id,
+        product_id: product.id,
+        name: product.name,
+        unit_cents: product.price_cents,
+        quantity,
+        taxed: product.taxed,
+        items_cents: itemsCents,
+        total_cents: totalCents,
+      },
+    });
+    return { itemId: item.id };
+  });
+}
+
+/** Takes one line off the bill. The row is kept and stamped with who removed it and when. */
+export async function removeItem(actor: Actor, id: string, itemId: string, now = new Date()): Promise<void> {
+  await withTx(async (tx) => {
+    const s = await mustLock(tx, id);
+    assertCan(s.status, "remove_item");
+    if ((await getCheckouts(tx, id)).some((c) => isCheckoutLive(c.status))) throw conflict(CHECKOUT_LIVE_MESSAGE);
+
+    const [item] = UUID_RE.test(itemId)
+      ? await tx<SessionItemRow[]>`
+          select id, session_id, product_id, name, unit_cents, quantity, taxed, added_by, added_at, removed_at, removed_by
+          from public.session_items where id = ${itemId} and session_id = ${id} for update`
+      : [];
+    if (!item) throw notFound("That item isn't on this bill.");
+    if (item.removed_at) throw conflict("That item has already been taken off the bill.");
+
+    const cents = item.unit_cents * item.quantity;
+    const itemsCents = s.items_cents - cents;
+    const closed = s.status === "awaiting_payment";
+    const totalCents = closed ? (s.total_cents ?? 0) - cents : s.total_cents;
+    if (closed && (totalCents ?? 0) <= 0) {
+      throw conflict("That would leave nothing on the bill. Ask a manager to void it instead.");
+    }
+
+    await tx`update public.session_items set removed_at = ${now}, removed_by = ${actor.staffId} where id = ${item.id}`;
+    if (closed) {
+      // Same as adding: a changed amount must never reuse an idempotency key Square has seen.
+      await tx`
+        update public.sessions set items_cents = ${itemsCents}, total_cents = ${totalCents},
+          checkout_attempt = checkout_attempt + 1
+        where id = ${id}`;
+    } else {
+      await tx`update public.sessions set items_cents = ${itemsCents} where id = ${id}`;
+    }
+    await audit(tx, {
+      ...by(actor),
+      action: "session.remove_item",
+      entity: "session",
+      entityId: id,
+      before: {
+        item_id: item.id,
+        product_id: item.product_id,
+        name: item.name,
+        unit_cents: item.unit_cents,
+        quantity: item.quantity,
+        items_cents: s.items_cents,
+        total_cents: s.total_cents,
+      },
+      after: { item_id: item.id, removed_at: now, items_cents: itemsCents, total_cents: totalCents },
+    });
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -888,11 +1193,12 @@ export async function editTimes(
     if (s.status === "awaiting_payment") {
       const fresh = await mustLock(tx, id);
       const r = repriceClosed(fresh, await getIntervals(tx, id));
-      totalCents = r.totalCents;
+      // Changing the times re-prices the table time only; the items on the bill stay as they are.
+      totalCents = r.totalCents + fresh.items_cents;
       billedMinutes = r.billedMinutes;
       // Skip an attempt number so a new amount can never reuse an idempotency key Square has seen.
       await tx`
-        update public.sessions set total_cents = ${r.totalCents}, billed_minutes = ${r.billedMinutes},
+        update public.sessions set total_cents = ${totalCents}, billed_minutes = ${r.billedMinutes},
           checkout_attempt = checkout_attempt + 1
         where id = ${id}`;
     }

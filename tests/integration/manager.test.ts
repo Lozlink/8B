@@ -158,7 +158,7 @@ describe("20. editTimes", () => {
 
     // The next card charge uses attempt 2 and the corrected amount.
     await chargeCard(actor, sessionId);
-    expect(h.gateway.creates[0]).toMatchObject({ idempotencyKey: `${sessionId}-a2`, amountCents: 3750 });
+    expect(h.gateway.creates[0]).toMatchObject({ idempotencyKey: `${sessionId}-a2i`, amountCents: 3750 });
   });
 
   it("requires a reason and refuses to edit while a checkout is live", async () => {

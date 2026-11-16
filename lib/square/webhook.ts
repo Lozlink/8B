@@ -41,6 +41,8 @@ export const terminalCheckoutPayload = z.object({
     status: z.string(),
     reference_id: z.string().optional().nullable(),
     cancel_reason: z.string().optional().nullable(),
+    // Present when the checkout was sent against an itemised order.
+    order_id: z.string().optional().nullable(),
     amount_money: z.object({ amount: z.number().int().nonnegative().optional() }).partial().optional().nullable(),
     updated_at: z.string().optional(),
   }),

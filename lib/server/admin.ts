@@ -8,7 +8,7 @@ import { audit } from "./audit";
 import { db, withTx, type Tx } from "./db";
 import { squareEnv, squareEnvironmentOrNull } from "./env";
 import { badRequest, conflict, notFound } from "./errors";
-import { getSettings, mapRateCard, type RateCardRow } from "./repo";
+import { getCatalogState, getProducts, getSettings, mapRateCard, type RateCardRow } from "./repo";
 
 const by = (a: Actor, m: Manager) => ({ actorStaffId: a.staffId, approvedByStaffId: m.id, deviceLabel: a.deviceLabel });
 
@@ -29,7 +29,7 @@ const sortedDays = (days: number[]) => [...new Set(days)].sort((a, b) => a - b);
 
 export async function getAdminState(manager: Manager): Promise<AdminStateDTO> {
   const q = db();
-  const [tables, rateCards, settings, staff, devices] = await Promise.all([
+  const [tables, rateCards, settings, staff, devices, products, catalog] = await Promise.all([
     q<{ id: string; name: string; sort_order: number; active: boolean }[]>`
       select id, name, sort_order, active from public.tables order by sort_order, name`,
     q<RateCardRow[]>`
@@ -41,9 +41,24 @@ export async function getAdminState(manager: Manager): Promise<AdminStateDTO> {
       select id, name, role, active from public.staff order by active desc, name`,
     q<{ id: string; label: string; enrolled_at: Date; last_seen_at: Date | null; revoked_at: Date | null }[]>`
       select id, label, enrolled_at, last_seen_at, revoked_at from public.devices order by revoked_at nulls first, label`,
+    getProducts(q, { activeOnly: false }),
+    getCatalogState(q),
   ]);
   return {
     manager,
+    catalog: {
+      products: products.map((p) => ({
+        id: p.id,
+        name: p.name,
+        priceCents: p.price_cents,
+        taxed: p.taxed,
+        category: p.category,
+        active: p.active,
+      })),
+      syncedAt: catalog.synced_at?.toISOString() ?? null,
+      tableHireLinked: !!catalog.table_hire_variation_id,
+      lastError: catalog.last_error,
+    },
     tables: tables.map((t) => ({ id: t.id, name: t.name, sortOrder: t.sort_order, active: t.active })),
     rateCards: rateCards.map((r) => ({
       id: r.id,
@@ -62,6 +77,7 @@ export async function getAdminState(manager: Manager): Promise<AdminStateDTO> {
       timezone: settings.timezone,
       businessDayStart: formatLocalTime(settings.businessDayStartMinute),
       terminalDeviceId: settings.terminalDeviceId,
+      itemiseCharges: settings.itemiseCharges,
     },
     staff,
     devices: devices.map((d) => ({
@@ -267,6 +283,30 @@ export async function updateSettings(
       entityId: null,
       before: { ...before, terminalDeviceId: undefined },
       after: s,
+      reason: r,
+    });
+  });
+}
+
+/**
+ * Manager switch for itemised Square charges. Off = every charge goes to the Terminal as a single
+ * amount, which is the fallback if itemised checkouts misbehave.
+ */
+export async function setItemiseCharges(actor: Actor, m: Manager, enabled: boolean, reason: string): Promise<void> {
+  const r = reasonOf(reason);
+  await withTx(async (tx) => {
+    const [before] = await tx<{ itemise_charges: boolean }[]>`
+      select itemise_charges from public.settings where id for update`;
+    if (!before) throw new Error("settings row missing — run the reference-data migration");
+    if (before.itemise_charges === enabled) return;
+    await tx`update public.settings set itemise_charges = ${enabled} where id`;
+    await audit(tx, {
+      ...by(actor, m),
+      action: "settings.itemise_charges",
+      entity: "settings",
+      entityId: null,
+      before: { itemise_charges: before.itemise_charges },
+      after: { itemise_charges: enabled },
       reason: r,
     });
   });

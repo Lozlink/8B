@@ -4,8 +4,10 @@ import type {
   CheckoutDTO,
   FloorDTO,
   IntervalDTO,
+  ProductDTO,
   SessionDetailDTO,
   SessionDTO,
+  SessionItemDTO,
   SettledMethod,
   SettledVia,
   SummaryDTO,
@@ -17,7 +19,16 @@ import { businessWindow, currentBusinessDate, formatYMD } from "@/lib/domain/bus
 import type postgres from "postgres";
 import { db, type Db } from "./db";
 import { notFound, badRequest } from "./errors";
-import { getPricingConfig, getSettings, pricingSettingsOf, type CheckoutRow, type SessionRow } from "./repo";
+import {
+  getPricingConfig,
+  getProducts,
+  getSettings,
+  pricingSettingsOf,
+  type CheckoutRow,
+  type ProductRow,
+  type SessionItemRow,
+  type SessionRow,
+} from "./repo";
 
 const iso = (d: Date | null): string | null => (d ? d.toISOString() : null);
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -39,7 +50,44 @@ function checkoutDTO(c: CheckoutRow): CheckoutDTO {
   };
 }
 
-/** Loads sessions matching `where` (a fragment over alias `s`) with intervals and latest checkout. */
+interface ItemJoinRow extends SessionItemRow {
+  added_by_name: string;
+  removed_by_name: string | null;
+}
+
+function itemDTO(i: ItemJoinRow): SessionItemDTO {
+  return {
+    id: i.id,
+    productId: i.product_id,
+    name: i.name,
+    unitCents: i.unit_cents,
+    quantity: i.quantity,
+    taxed: i.taxed,
+    addedAt: i.added_at.toISOString(),
+    addedByName: i.added_by_name,
+    removedAt: iso(i.removed_at),
+    removedByName: i.removed_by_name,
+  };
+}
+
+/** Bill items for the given sessions: the live ones (`removed: false`) or the ones taken off. */
+async function loadItems(q: Db, sessionIds: string[], opts: { removed: boolean }): Promise<ItemJoinRow[]> {
+  return q<ItemJoinRow[]>`
+    select i.id, i.session_id, i.product_id, i.name, i.unit_cents, i.quantity, i.taxed, i.added_by, i.added_at,
+           i.removed_at, i.removed_by, ab.name as added_by_name, rb.name as removed_by_name
+    from public.session_items i
+    join public.staff ab on ab.id = i.added_by
+    left join public.staff rb on rb.id = i.removed_by
+    where i.session_id = any(${sessionIds}::uuid[])
+      and ${opts.removed ? q`i.removed_at is not null` : q`i.removed_at is null`}
+    order by ${opts.removed ? q`i.removed_at, i.id` : q`i.added_at, i.id`}`;
+}
+
+export function productDTO(p: ProductRow): ProductDTO {
+  return { id: p.id, name: p.name, priceCents: p.price_cents, taxed: p.taxed, category: p.category };
+}
+
+/** Loads sessions matching `where` (a fragment over alias `s`) with intervals, items and latest checkout. */
 async function loadSessions(q: Db, where: postgres.Fragment): Promise<SessionDTO[]> {
   const rows = await q<SessionJoinRow[]>`
     select s.*, op.name as opened_by_name, sb.name as settled_by_name
@@ -53,7 +101,7 @@ async function loadSessions(q: Db, where: postgres.Fragment): Promise<SessionDTO
   const ids = rows.map((r) => r.id);
   const checkoutIds = rows.map((r) => r.square_checkout_id).filter((x): x is string => !!x);
 
-  const [intervals, checkouts] = await Promise.all([
+  const [intervals, checkouts, items] = await Promise.all([
     q<{ id: string; session_id: string; table_id: string; table_name: string; started_at: Date; ended_at: Date | null }[]>`
       select i.id, i.session_id, i.table_id, t.name as table_name, i.started_at, i.ended_at
       from public.session_intervals i join public.tables t on t.id = i.table_id
@@ -62,6 +110,8 @@ async function loadSessions(q: Db, where: postgres.Fragment): Promise<SessionDTO
     checkoutIds.length
       ? q<CheckoutRow[]>`select * from public.terminal_checkouts where id = any(${checkoutIds}::text[])`
       : Promise.resolve([] as CheckoutRow[]),
+    // One query for every session's items, not one per session.
+    loadItems(q, ids, { removed: false }),
   ]);
 
   const bySession = new Map<string, IntervalDTO[]>();
@@ -77,6 +127,12 @@ async function loadSessions(q: Db, where: postgres.Fragment): Promise<SessionDTO
     bySession.set(i.session_id, list);
   }
   const checkoutById = new Map(checkouts.map((c) => [c.id, checkoutDTO(c)]));
+  const itemsBySession = new Map<string, SessionItemDTO[]>();
+  for (const i of items) {
+    const list = itemsBySession.get(i.session_id) ?? [];
+    list.push(itemDTO(i));
+    itemsBySession.set(i.session_id, list);
+  }
 
   return rows.map((r) => ({
     id: r.id,
@@ -87,6 +143,8 @@ async function loadSessions(q: Db, where: postgres.Fragment): Promise<SessionDTO
     closedAt: iso(r.closed_at),
     billedMinutes: r.billed_minutes,
     totalCents: r.total_cents,
+    itemsCents: r.items_cents,
+    items: itemsBySession.get(r.id) ?? [],
     settledMethod: r.settled_method,
     settledVia: r.settled_via,
     settledAt: iso(r.settled_at),
@@ -100,7 +158,7 @@ async function loadSessions(q: Db, where: postgres.Fragment): Promise<SessionDTO
 
 export async function getFloor(): Promise<FloorDTO> {
   const q = db();
-  const [tables, sessions, [unpaid], { settings, rateCards }] = await Promise.all([
+  const [tables, sessions, [unpaid], { settings, rateCards }, products] = await Promise.all([
     q<{ id: string; name: string; sort_order: number; active: boolean }[]>`
       select id, name, sort_order, active from public.tables
       where active or id in (select current_table_id from public.sessions where current_table_id is not null)
@@ -110,6 +168,7 @@ export async function getFloor(): Promise<FloorDTO> {
       select count(*)::int as n from public.sessions
       where status = 'awaiting_payment' and current_table_id is null`,
     getPricingConfig(q),
+    getProducts(q, { activeOnly: true }),
   ]);
   return {
     serverTime: new Date().toISOString(),
@@ -118,6 +177,7 @@ export async function getFloor(): Promise<FloorDTO> {
     unpaidOffTableCount: unpaid?.n ?? 0,
     pricing: { settings: pricingSettingsOf(settings), rateCards },
     terminalPaired: !!settings.terminalDeviceId,
+    products: products.map(productDTO),
   };
 }
 
@@ -207,13 +267,15 @@ export async function getSessionDetail(id: string): Promise<SessionDetailDTO> {
   const [session] = await loadSessions(q, q`s.id = ${id}`);
   if (!session) throw notFound("Session not found.");
 
-  const [[snapRow], checkouts, audit] = await Promise.all([
+  const [[snapRow], checkouts, removed, audit] = await Promise.all([
     q<{ rate_snapshot: RateSnapshot | null; closed_at: Date | null }[]>`
       select rate_snapshot, closed_at from public.sessions where id = ${id}`,
     q<CheckoutRow[]>`select * from public.terminal_checkouts where session_id = ${id} order by attempt`,
+    loadItems(q, [id], { removed: true }),
     getAudit({ entity: "session", entityId: id, limit: 200 }),
   ]);
 
+  // Table time only: the items are on `session.items` and add to this (see lib/domain/bill.ts).
   let breakdown: SessionDetailDTO["breakdown"] = null;
   if (session.status !== "void" || snapRow?.rate_snapshot) {
     const intervals = session.intervals.map((i) => ({ startedAt: i.startedAt, endedAt: i.endedAt }));
@@ -233,7 +295,13 @@ export async function getSessionDetail(id: string): Promise<SessionDetailDTO> {
     };
   }
 
-  return { session, checkouts: checkouts.map(checkoutDTO), breakdown, audit: audit.entries.reverse() };
+  return {
+    session,
+    checkouts: checkouts.map(checkoutDTO),
+    breakdown,
+    removedItems: removed.map(itemDTO),
+    audit: audit.entries.reverse(),
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -271,12 +339,20 @@ export async function getSummary(dateParam: string | null): Promise<SummaryDTO> 
               from public.session_intervals i join public.tables t on t.id = i.table_id
               where i.session_id = s.id), '') as table_names`;
 
-  const [closed, paid, unpaid, older, voids, attention] = await Promise.all([
-    q<{ count: number; minutes: number; cents: number }[]>`
+  const [closed, itemsSold, paid, unpaid, older, voids, attention] = await Promise.all([
+    q<{ count: number; minutes: number; cents: number; items_cents: number }[]>`
       select count(*)::int as count, coalesce(sum(billed_minutes), 0)::int as minutes,
-             coalesce(sum(total_cents), 0)::int as cents
+             coalesce(sum(total_cents), 0)::int as cents, coalesce(sum(items_cents), 0)::int as items_cents
       from public.sessions
       where status <> 'void' and closed_at >= ${from} and closed_at < ${to}`,
+    // What was sold on those same bills. Grouped by product; the name is the latest one used.
+    q<{ product_id: string; name: string; quantity: number; cents: number }[]>`
+      select i.product_id, (array_agg(i.name order by i.added_at desc, i.id))[1] as name,
+             sum(i.quantity)::int as quantity, sum(i.unit_cents * i.quantity)::int as cents
+      from public.session_items i join public.sessions s on s.id = i.session_id
+      where i.removed_at is null and s.status <> 'void' and s.closed_at >= ${from} and s.closed_at < ${to}
+      group by i.product_id
+      order by cents desc, name, i.product_id`,
     q<(SummaryRow & { settled_method: SettledMethod; settled_via: SettledVia; settled_at: Date; settled_by_name: string | null })[]>`
       select s.id, s.opened_at, s.closed_at, s.billed_minutes, s.total_cents, s.settled_method, s.settled_via,
              s.settled_at, sb.name as settled_by_name, ${tableNamesSql}
@@ -309,13 +385,22 @@ export async function getSummary(dateParam: string | null): Promise<SummaryDTO> 
     totalCents: r.total_cents,
   });
   const sum = (list: { total_cents: number | null }[]) => list.reduce((a, r) => a + (r.total_cents ?? 0), 0);
+  const billedCents = closed[0]?.cents ?? 0;
+  const soldCents = closed[0]?.items_cents ?? 0;
   const card = paid.filter((p) => p.settled_method === "card");
   const cash = paid.filter((p) => p.settled_method === "cash");
   return {
     businessDate: formatYMD(date),
     from: from.toISOString(),
     to: to.toISOString(),
-    sessions: { count: closed[0]?.count ?? 0, billedMinutes: closed[0]?.minutes ?? 0, billedCents: closed[0]?.cents ?? 0 },
+    sessions: {
+      count: closed[0]?.count ?? 0,
+      billedMinutes: closed[0]?.minutes ?? 0,
+      billedCents,
+      tableCents: billedCents - soldCents,
+      itemsCents: soldCents,
+    },
+    itemsSold: itemsSold.map((i) => ({ productId: i.product_id, name: i.name, quantity: i.quantity, cents: i.cents })),
     paid: { card: { count: card.length, cents: sum(card) }, cash: { count: cash.length, cents: sum(cash) } },
     paidItems: paid.map((p) => ({
       ...row(p),

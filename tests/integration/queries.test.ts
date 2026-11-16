@@ -273,7 +273,13 @@ describe("getSummary", () => {
     expect(sum.to).toBe(local("2026-11-21T06:00:00").toISOString());
 
     // closed in window, non-void: card (2500) + cash@06:00 (2500) + late (1875) = 3 sessions, 130 min
-    expect(sum.sessions).toEqual({ count: 3, billedMinutes: 60 + 60 + 45, billedCents: 2500 + 2500 + 1875 });
+    expect(sum.sessions).toEqual({
+      count: 3,
+      billedMinutes: 60 + 60 + 45,
+      billedCents: 2500 + 2500 + 1875,
+      tableCents: 2500 + 2500 + 1875,
+      itemsCents: 0,
+    });
     // Paid in window: the 05:55 cash sale is the previous day's.
     expect(sum.paid.card).toEqual({ count: 1, cents: 2500 });
     expect(sum.paid.cash).toEqual({ count: 1, cents: 2500 });
@@ -293,7 +299,7 @@ describe("getSummary", () => {
 
     // previous business day carries the 05:50 session
     const prev = await getSummary("2026-11-19");
-    expect(prev.sessions).toEqual({ count: 1, billedMinutes: 50, billedCents: 2083 });
+    expect(prev.sessions).toEqual({ count: 1, billedMinutes: 50, billedCents: 2083, tableCents: 2083, itemsCents: 0 });
     expect(prev.paid.cash).toEqual({ count: 1, cents: 2083 });
     expect(prev.paid.card.count).toBe(0);
 
