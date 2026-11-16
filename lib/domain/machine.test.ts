@@ -1,0 +1,56 @@
+import { describe, expect, it } from "vitest";
+import { assertCan, can, isCheckoutLive, MANAGER_ACTIONS, TransitionError, type SessionAction } from "./machine";
+
+describe("session state machine", () => {
+  it("allows the happy path", () => {
+    expect(can("running", "pause")).toBe(true);
+    expect(can("paused", "resume")).toBe(true);
+    expect(can("running", "transfer")).toBe(true);
+    expect(can("paused", "transfer")).toBe(true);
+    expect(can("running", "stop")).toBe(true);
+    expect(can("paused", "stop")).toBe(true);
+    expect(can("awaiting_payment", "charge_card")).toBe(true);
+    expect(can("awaiting_payment", "mark_paid")).toBe(true);
+    expect(can("paid", "reverse_paid")).toBe(true);
+  });
+
+  it("refuses illegal transitions", () => {
+    expect(can("paused", "pause")).toBe(false);
+    expect(can("running", "resume")).toBe(false);
+    expect(can("running", "mark_paid")).toBe(false);
+    expect(can("running", "charge_card")).toBe(false);
+    expect(can("awaiting_payment", "pause")).toBe(false);
+    expect(can("awaiting_payment", "transfer")).toBe(false);
+  });
+
+  it("paid can only be reversed; void is terminal", () => {
+    const all: SessionAction[] = [
+      "pause", "resume", "transfer", "stop", "release_table", "charge_card", "cancel_checkout",
+      "resend_checkout", "sync_checkout", "mark_paid", "void", "reverse_paid", "edit_times",
+    ];
+    expect(all.filter((a) => can("paid", a))).toEqual(["reverse_paid"]);
+    expect(all.filter((a) => can("void", a))).toEqual([]);
+  });
+
+  it("a paid session cannot be voided directly (reverse first, so the trail shows both steps)", () => {
+    expect(can("paid", "void")).toBe(false);
+  });
+
+  it("assertCan throws a readable TransitionError", () => {
+    expect(() => assertCan("paid", "pause")).toThrow(TransitionError);
+    expect(() => assertCan("paid", "pause")).toThrow("Can't pause a session that is paid.");
+  });
+
+  it("manager-only actions", () => {
+    expect([...MANAGER_ACTIONS].sort()).toEqual(["edit_times", "reverse_paid", "void"]);
+  });
+
+  it("treats CANCEL_REQUESTED as still able to take money", () => {
+    expect(isCheckoutLive("PENDING")).toBe(true);
+    expect(isCheckoutLive("IN_PROGRESS")).toBe(true);
+    expect(isCheckoutLive("CANCEL_REQUESTED")).toBe(true);
+    expect(isCheckoutLive("CANCELED")).toBe(false);
+    expect(isCheckoutLive("COMPLETED")).toBe(false);
+    expect(isCheckoutLive(null)).toBe(false);
+  });
+});
