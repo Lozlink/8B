@@ -62,6 +62,7 @@ function subscribeOnline(cb: () => void): () => void {
 
 const POLL_MS = 20_000;
 const RETRY_MS = 3_000;
+const BROADCAST_MIN_GAP_MS = 1_000;
 const TIME_SYNC_MS = 5 * 60_000;
 
 export function FloorProvider({ children }: { children: ReactNode }) {
@@ -202,8 +203,12 @@ export function FloorProvider({ children }: { children: ReactNode }) {
     const channel = sb
       .channel("floor")
       .on("broadcast", { event: "changed" }, () => {
+        // Coalesce bursts, and never refetch more than about once a second because of pings:
+        // each floor refetch also reloads whatever sheet or page is open, so a broadcast storm
+        // must not turn into a request storm.
         clearTimeout(debounce);
-        debounce = setTimeout(() => void refetch(), 150);
+        const sinceLast = Date.now() - lastAttempt.current;
+        debounce = setTimeout(() => void refetch(), Math.max(150, BROADCAST_MIN_GAP_MS - sinceLast));
       })
       .subscribe((status) => {
         // Catch up on anything missed while (re)connecting.

@@ -12,14 +12,26 @@ declare global {
 }
 
 /**
- * One pool per server instance. Supabase's transaction pooler (port 6543) doesn't support
- * prepared statements, hence `prepare: false`. Connects as the least-privilege `timer_app` role.
+ * One pool per server instance. Connects as the least-privilege `timer_app` role through
+ * Supabase's transaction pooler (Supavisor, port 6543), which needs two settings:
+ *
+ * - `prepare: false`: no prepared statements in transaction mode.
+ * - `max_pipeline: 1`: Supavisor never answers pipelined queries in transaction mode. When more
+ *   queries are in flight than there are connections (the daily summary runs 7 at once),
+ *   postgres.js would send several down one connection, that connection would wedge, and every
+ *   later query on this instance would queue behind it until Vercel killed the request at 300 s.
+ *   With 1, extra queries wait for a free connection instead.
+ *
+ * `query_timeout` is the backstop if the pooler ever goes silent again: the query fails with
+ * QUERY_TIMEOUT, the connection is replaced, and the next request works.
  */
 export function db(): postgres.Sql {
   if (!globalThis.__timerSql) {
     globalThis.__timerSql = postgres(env().DATABASE_URL, {
       prepare: false,
       max: 5,
+      max_pipeline: 1,
+      query_timeout: 15,
       idle_timeout: 20,
       connect_timeout: 10,
       onnotice: () => {},

@@ -582,6 +582,19 @@ export async function syncCheckout(actor: Actor | null, id: string): Promise<voi
 export async function syncStaleCheckouts(limit = 3): Promise<void> {
   // Covers every live checkout, whether or not its bill is still on a table (bills charged from
   // the Unpaid list, or marked paid while the Terminal was still cancelling).
+  //
+  // Read-only check first. The floor-change broadcast triggers are statement-level, so they fire
+  // even for an UPDATE that matches no rows. An unconditional claim on every floor fetch would
+  // broadcast "changed", make every iPad refetch the floor, run this again, and loop forever.
+  const [due] = await db()<{ due: boolean }[]>`
+    select exists (
+      select 1 from public.terminal_checkouts
+      where status in ('PENDING', 'IN_PROGRESS', 'CANCEL_REQUESTED')
+        and created_at < now() - interval '8 seconds'
+        and (last_synced_at is null or last_synced_at < now() - interval '15 seconds')
+    ) as due`;
+  if (!due?.due) return;
+
   // Claim the rows atomically by stamping last_synced_at first: concurrent callers (three iPads
   // polling) skip each other's rows, and a failing Square call can't make us retry the same
   // checkout on every poll.
