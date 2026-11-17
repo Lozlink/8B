@@ -21,6 +21,17 @@ export function ItemsTab({ state, reload, onError }: TabProps) {
   // Active items first, in the order the server gave them.
   const products = [...catalog.products].sort((a, b) => Number(b.active) - Number(a.active));
 
+  const sq = state.squareCash;
+  const sendNow = async () => {
+    const r = await run(() => api.adminRetrySquareCash(), {
+      refetch: false,
+      onError: (e) => (isManagerRequired(e) ? onError(e) : false),
+    });
+    if (!r) return;
+    await reload();
+    toast.show(r.pending + r.failed === 0 ? "All cash sales are in Square" : "Sent. Some are still not in Square", r.pending + r.failed === 0 ? "success" : "error");
+  };
+
   const refresh = async () => {
     const r = await run(() => api.adminSyncProducts(), {
       refetch: true,
@@ -59,6 +70,29 @@ export function ItemsTab({ state, reload, onError }: TabProps) {
         <Button variant="primary" size="lg" disabled={pending} onClick={() => void refresh()}>
           {pending ? "Refreshing…" : "Refresh from Square"}
         </Button>
+      </div>
+
+      <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-line bg-surface p-4">
+        <div className="min-w-0">
+          <p className="text-sm font-semibold text-muted">Cash sales in Square</p>
+          {sq.pending === 0 && sq.failed === 0 ? (
+            <p className="text-lg font-semibold">All cash sales are in Square</p>
+          ) : (
+            <>
+              <p className="text-lg font-semibold tabular-nums">
+                {sq.pending > 0 ? `${sq.pending} sending` : ""}
+                {sq.pending > 0 && sq.failed > 0 ? " · " : ""}
+                {sq.failed > 0 ? `${sq.failed} failed` : ""}
+              </p>
+              {sq.lastError ? <p className="mt-1 break-words text-sm text-muted">{sq.lastError}</p> : null}
+            </>
+          )}
+        </div>
+        {sq.pending > 0 || sq.failed > 0 ? (
+          <Button variant="primary" size="lg" disabled={pending} onClick={() => void sendNow()}>
+            {pending ? "Sending…" : "Send now"}
+          </Button>
+        ) : null}
       </div>
 
       {products.length === 0 ? (

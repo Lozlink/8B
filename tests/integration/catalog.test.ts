@@ -629,7 +629,7 @@ describe("C4. DTOs", () => {
       { productId: "VAR_CHIPS", name: "Chips", quantity: 1, cents: 600 },
     ]);
     expect(sum.itemsSold.reduce((n, i) => n + i.cents, 0)).toBe(sum.sessions.itemsCents);
-    expect(sum.paid.cash).toEqual({ count: 1, cents: 4000 });
+    expect(sum.paid.cash).toEqual({ count: 1, cents: 4000, roundingCents: 0 });
     expect(sum.unpaid).toMatchObject({ count: 1, cents: 3850 });
     expect(() => JSON.stringify(sum)).not.toThrow();
   });

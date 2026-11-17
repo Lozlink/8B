@@ -282,7 +282,7 @@ describe("getSummary", () => {
     });
     // Paid in window: the 05:55 cash sale is the previous day's.
     expect(sum.paid.card).toEqual({ count: 1, cents: 2500 });
-    expect(sum.paid.cash).toEqual({ count: 1, cents: 2500 });
+    expect(sum.paid.cash).toEqual({ count: 1, cents: 2500, roundingCents: 0 });
     expect(sum.paidItems.map((p) => [p.id, p.method, p.via, p.settledByName])).toEqual([
       [s.cash, "cash", "staff", "Sam Staff"],
       [s.card, "card", "staff", "Sam Staff"],
@@ -300,7 +300,7 @@ describe("getSummary", () => {
     // previous business day carries the 05:50 session
     const prev = await getSummary("2026-11-19");
     expect(prev.sessions).toEqual({ count: 1, billedMinutes: 50, billedCents: 2083, tableCents: 2083, itemsCents: 0 });
-    expect(prev.paid.cash).toEqual({ count: 1, cents: 2083 });
+    expect(prev.paid.cash).toEqual({ count: 1, cents: 2085, roundingCents: 2 }); // $20.83 collected as $20.85
     expect(prev.paid.card.count).toBe(0);
 
     // and the following day carries the 06:30 session, plus yesterday's unpaid as "older"

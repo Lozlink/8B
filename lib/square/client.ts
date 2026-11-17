@@ -16,8 +16,9 @@ export function square(): SquareClient {
     client = new SquareClient({
       token: e.SQUARE_ACCESS_TOKEN,
       environment: e.SQUARE_ENVIRONMENT === "production" ? SquareEnvironment.Production : SquareEnvironment.Sandbox,
-      // Stay well inside the route's maxDuration. The SDK retries 408/429/5xx with the same
-      // idempotency key, so a retry can't create a second checkout.
+      // Defaults for calls made outside any database lock (background checks, the catalogue,
+      // pairing). The SDK retries 408/429/5xx and waits for Retry-After before it does, so anything
+      // called while a bill is locked passes its own shorter, no-retry options instead.
       timeoutInSeconds: 12,
       maxRetries: 1,
     });
@@ -33,11 +34,14 @@ export function isSquareStatus(e: unknown, status: number): boolean {
   return e instanceof SquareError && e.statusCode === status;
 }
 
-/** Converts SDK errors into a message staff can act on. */
-export function toUpstreamError(e: unknown, what: string): AppError {
+/**
+ * Converts SDK errors into a message staff can act on. `onTimeout` is the advice that follows a
+ * timeout; the default suits a card request, which may be sitting on the Terminal.
+ */
+export function toUpstreamError(e: unknown, what: string, onTimeout = "Check the Terminal, then try again."): AppError {
   if (e instanceof AppError) return e; // e.g. square_not_configured — already staff-readable
   if (e instanceof SquareTimeoutError) {
-    return upstream(`Square didn't answer in time while trying to ${what}. Check the Terminal, then try again.`);
+    return upstream(`Square didn't answer in time while trying to ${what}. ${onTimeout}`);
   }
   if (e instanceof SquareError) {
     const first = e.errors[0];

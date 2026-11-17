@@ -139,9 +139,35 @@ export const api = {
   /** Ask Square now (use while the "Sent to Terminal" panel is open, every ~5 s). */
   sync: (id: string) => post<{ ok: true }>(`/api/sessions/${enc(id)}/sync`),
 
-  /** method "card" requires cardConfirmed: true (staff ticked "approved on Terminal/Square"). */
+  /**
+   * method "card" requires cardConfirmed: true (staff ticked "approved on Terminal/Square").
+   * method "cash": the app records the sale in Square itself (in the background), for the bill
+   * rounded to 5c. Staff must NOT also ring it into Square POS.
+   */
   markPaid: (id: string, method: SettledMethod, cardConfirmed = false) =>
     post<WithWarnings<MarkPaidOutcome>>(`/api/sessions/${enc(id)}/mark-paid`, { method, cardConfirmed }),
+
+  /**
+   * Cash through the Square POS app on this iPad, so the drawer on the Square Stand opens.
+   * Returns the link that opens Square POS with the cash amount filled in. Square POS records the
+   * sale (amount and a note, not itemised); the app must not also record it. 409 if a card request
+   * is live; 503 if Square POS handoff isn't configured.
+   */
+  cashHandoff: (id: string) => post<{ url: string; amountCents: number }>(`/api/sessions/${enc(id)}/cash-handoff`),
+  /**
+   * Asks Square whether the cash sale handed to Square POS went through, and settles the bill if
+   * so. Call when the app comes back to the front after a handoff, and before offering the manual
+   * cash button again.
+   */
+  cashHandoffCheck: (id: string) =>
+    post<{ paid: boolean }>(`/api/sessions/${enc(id)}/cash-handoff-check`),
+
+  /**
+   * Public (no cookies): sends Square POS's callback `data` (the raw JSON string from the return
+   * link) to the server, which settles the bill if the sale went through.
+   */
+  posReturn: (data: string) =>
+    post<{ result: "paid" | "canceled" | "pending" | "error"; message: string }>("/api/pos/return", { data }),
 
   /**
    * Puts `quantity` (1–99) of a product on the bill at the product's current price. Allowed while
@@ -221,6 +247,12 @@ export const api = {
   /** Turns itemised Square charges on or off. */
   adminItemise: (enabled: boolean, reason: string) =>
     post<{ ok: true }>("/api/admin/products", { op: "itemise", enabled, reason }),
+
+  /**
+   * Sends every cash payment that isn't in Square yet, including ones that had failed. Returns what
+   * is still outstanding afterwards. 503 if Square isn't configured.
+   */
+  adminRetrySquareCash: () => post<{ pending: number; failed: number; lastError: string | null }>("/api/admin/square-cash", { op: "retry" }),
 
   adminRevokeDevice: (id: string, reason: string) => post<{ ok: true }>("/api/admin/devices", { op: "revoke", id, reason }),
 

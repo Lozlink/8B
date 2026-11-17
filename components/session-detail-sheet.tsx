@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useState } from "react";
+import { useCallback, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { ActionDialog } from "@/components/action-dialog";
 import { EditTimesDialog } from "@/components/edit-times-dialog";
@@ -48,11 +48,17 @@ export function SessionDetailSheet({ sessionId, onClose, onCharge }: Props) {
 
   const tz = floor?.pricing.settings.timezone ?? "Australia/Sydney";
 
+  // Only the newest detail request may apply, so an older reply can't overwrite a newer one.
+  const seq = useRef(0);
   const load = useCallback(async () => {
+    const mine = ++seq.current;
     try {
-      setDetail(await api.session(sessionId));
+      const d = await api.session(sessionId);
+      if (mine !== seq.current) return;
+      setDetail(d);
       setError(null);
     } catch (e) {
+      if (mine !== seq.current) return;
       const dest = authRedirect(e);
       if (dest) router.replace(dest);
       else setError(errorMessage(e));
@@ -109,9 +115,19 @@ export function SessionDetailSheet({ sessionId, onClose, onCharge }: Props) {
             {s.settledAt ? (
               <Fact
                 label="Settled"
-                value={`${formatDateTime(s.settledAt, tz)} · ${s.settledMethod ?? "—"}${s.settledByName ? ` · ${s.settledByName}` : ""}${s.settledVia ? ` (${viaLabel(s.settledVia)})` : ""}`}
+                value={`${formatDateTime(s.settledAt, tz)} · ${s.settledMethod ?? "—"}${s.settledByName ? ` · ${s.settledByName}` : ""}${s.settledVia ? ` (${viaLabel(s.settledVia, s.settledMethod)})` : ""}`}
               />
             ) : null}
+            {s.settledAt && s.settledCents !== null && s.settledMethod === "cash" ? (
+              <Fact label="Cash collected" value={formatCents(s.settledCents)} />
+            ) : null}
+            {s.settledAt && s.settledCents !== null && s.settledMethod === "card" && s.totalCents !== null && s.settledCents !== s.totalCents ? (
+              <>
+                <Fact label="Bill" value={formatCents(s.totalCents)} />
+                <Fact label="Card charged" value={formatCents(s.settledCents)} />
+              </>
+            ) : null}
+            {s.settledMethod === "cash" && s.squareCash ? <SquareCashFact cash={s.squareCash} /> : null}
             {s.voidReason ? <Fact label="Void reason" value={s.voidReason} /> : null}
             {s.note ? <Fact label="Note" value={s.note} /> : null}
           </dl>
@@ -253,7 +269,7 @@ export function SessionDetailSheet({ sessionId, onClose, onCharge }: Props) {
       {dialog === "reverse" && s ? (
         <ActionDialog
           title="Reverse payment"
-          description="Puts the session back to awaiting payment. Refund any money through Square yourself. Needs a manager PIN."
+          description={s.settledMethod === "cash" ? "The bill goes back to unpaid. The app takes the cash sale back out of Square. Hand the cash back yourself. Needs a manager PIN." : "Puts the session back to awaiting payment. Refund any money through Square yourself. Needs a manager PIN."}
           requirePin
           danger
           submitLabel="Reverse payment"
@@ -269,10 +285,32 @@ export function SessionDetailSheet({ sessionId, onClose, onCharge }: Props) {
   );
 }
 
-function viaLabel(via: string): string {
+function viaLabel(via: string, method: string | null): string {
+  if (method === "cash" && via === "square_api") return "Square POS";
   if (via === "square_webhook") return "Square webhook";
   if (via === "square_api") return "Square check";
   return "staff";
+}
+
+function SquareCashFact({ cash }: { cash: NonNullable<SessionDetailDTO["session"]["squareCash"]> }) {
+  if (cash.state === "skipped") return null;
+  const text =
+    cash.state === "recorded"
+      ? "In Square"
+      : cash.state === "pending"
+        ? "Sending to Square"
+        : cash.state === "refunded"
+          ? "Reversed. Refund recorded in Square"
+          : "Not in Square yet. A manager can retry in Admin → Items.";
+  return (
+    <div>
+      <dt className="text-sm font-semibold text-muted">Square</dt>
+      <dd className={cash.state === "failed" ? "text-warn" : ""}>
+        {text}
+        {cash.state === "failed" && cash.error ? <span className="block text-sm text-muted">{cash.error}</span> : null}
+      </dd>
+    </div>
+  );
 }
 
 function Fact({ label, value }: { label: string; value: string }) {

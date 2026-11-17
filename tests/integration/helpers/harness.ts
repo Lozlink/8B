@@ -9,6 +9,8 @@ import { setDbForTests } from "@/lib/server/db";
 import type { Actor, Manager } from "@/lib/server/auth";
 import { setCatalogGatewayForTests } from "@/lib/server/items";
 import { setTerminalGatewayForTests } from "@/lib/server/sessions";
+import { setPosGatewayForTests } from "@/lib/server/pos-cash";
+import { setCashGatewayForTests } from "@/lib/server/square-cash";
 import { FakeCatalog, FakeGateway } from "./fake-gateway";
 
 // Server env the admin/queries modules read lazily (never contacts Square).
@@ -19,6 +21,7 @@ const TEST_ENV: Record<string, string> = {
   SQUARE_ENVIRONMENT: "sandbox",
   SQUARE_ACCESS_TOKEN: "test-token",
   SQUARE_LOCATION_ID: "LOC_TEST",
+  SQUARE_APPLICATION_ID: "sq0idp-test-app",
   SQUARE_WEBHOOK_SIGNATURE_KEY: "test-key",
   SQUARE_WEBHOOK_URL: "https://example.test/api/square/webhook",
 };
@@ -30,6 +33,19 @@ const read = (f: string) => readFileSync(resolve(MIGRATIONS, f), "utf8");
 export const INIT_SQL = read("20261116000000_init.sql");
 export const REFERENCE_SQL = read("20261116000100_reference_data.sql");
 export const SESSION_ITEMS_SQL = read("20261117000000_session_items.sql");
+export const SQUARE_CASH_SQL = read("20261118000000_square_cash.sql");
+export const CHECKOUT_BROADCAST_SQL = read("20261118000100_checkout_broadcast.sql");
+
+/** What Supabase provides out of the box. There is deliberately no `realtime` schema. */
+export const PRELUDE_SQL = `
+  create role anon nologin;
+  create role authenticated nologin;
+  create role service_role nologin;
+  create schema extensions;
+  grant usage on schema public to anon, authenticated, service_role;
+  grant all on all tables in schema public to anon, authenticated, service_role;
+  alter default privileges in schema public grant all on tables to anon, authenticated, service_role;
+`;
 
 export interface TestStaff {
   /** Plain staff member acting on the Counter iPad. */
@@ -66,20 +82,13 @@ const MANAGER_HASH = hashSync(MANAGER_PIN, 4);
 export async function bootHarness(): Promise<Harness> {
   const pg = await PGlite.create({ extensions: { btree_gist } });
 
-  // What Supabase provides out of the box. There is deliberately no `realtime` schema.
-  await pg.exec(`
-    create role anon nologin;
-    create role authenticated nologin;
-    create role service_role nologin;
-    create schema extensions;
-    grant usage on schema public to anon, authenticated, service_role;
-    grant all on all tables in schema public to anon, authenticated, service_role;
-    alter default privileges in schema public grant all on tables to anon, authenticated, service_role;
-  `);
+  await pg.exec(PRELUDE_SQL);
   await pg.exec(INIT_SQL);
   await pg.exec(REFERENCE_SQL);
   // Later migrations run against a database that already holds the reference data, as in production.
   await pg.exec(SESSION_ITEMS_SQL);
+  await pg.exec(SQUARE_CASH_SQL);
+  await pg.exec(CHECKOUT_BROADCAST_SQL);
 
   const server = new PGLiteSocketServer({ db: pg, port: 0, host: "127.0.0.1" });
   await server.start();
@@ -103,6 +112,8 @@ export async function bootHarness(): Promise<Harness> {
 
   const gateway = new FakeGateway();
   setTerminalGatewayForTests(gateway);
+  setCashGatewayForTests(gateway);
+  setPosGatewayForTests(gateway);
   const catalog = new FakeCatalog();
   setCatalogGatewayForTests(catalog);
 
@@ -136,7 +147,7 @@ export async function bootHarness(): Promise<Harness> {
         // Replica mode skips the no-delete triggers; this is test setup only.
         await pg.exec(`
           set session_replication_role = replica;
-          truncate public.audit_log, public.webhook_events, public.terminal_checkouts, public.session_items,
+          truncate public.audit_log, public.webhook_events, public.square_cash_records, public.terminal_checkouts, public.session_items,
             public.session_intervals, public.sessions, public.products, public.login_attempts, public.devices,
             public.rate_cards, public.tables, public.settings, public.staff restart identity cascade;
           update public.catalog_state set synced_at = null, table_hire_variation_id = null, last_error = null;

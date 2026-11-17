@@ -10,11 +10,13 @@ import { api } from "@/lib/client/api";
 import { useLoad } from "@/lib/client/use-load";
 import { authRedirect, errorMessage } from "@/lib/client/errors";
 import { useFloor } from "@/lib/client/floor-context";
+import { useStandDevice } from "@/lib/client/stand";
 import { useAction } from "@/lib/client/use-action";
 import { isCheckoutLive } from "@/lib/domain/machine";
 import type { SessionDetailDTO } from "@/lib/domain/types";
 import { formatCents } from "@/lib/pricing";
 import { billOf, groupItems } from "@/lib/client/bill-view";
+import { cashDueCents } from "@/lib/domain/bill";
 import { checkoutLabel, sessionTableNames } from "@/lib/client/session-view";
 
 const ALREADY_PAID = "Card payment already went through — this bill is paid. Don't take cash.";
@@ -36,16 +38,29 @@ export function ChargeSheet({ sessionId, onClose }: Props) {
   const [confirmCard, setConfirmCard] = useState(false);
   const [alreadyCard, setAlreadyCard] = useState(false);
   const [warnings, setWarnings] = useState<string[]>([]);
+  const [onStand] = useStandDevice();
+  // Cash through Square POS (the drawer opens there): idle, waiting for the sale, or gave up waiting.
+  const [handoff, setHandoff] = useState<"idle" | "waiting" | "gave_up">("idle");
+  const [notOpened, setNotOpened] = useState(false);
+  const [checking, setChecking] = useState(false);
+  const [checkedNotPaid, setCheckedNotPaid] = useState(false);
+  const checkBusy = useRef(false);
   const onCloseRef = useRef(onClose);
   useEffect(() => {
     onCloseRef.current = onClose;
   });
 
+  // Only the newest detail request may apply, so an older reply can't flip the sheet back.
+  const seq = useRef(0);
   const load = useCallback(async () => {
+    const mine = ++seq.current;
     try {
-      setDetail(await api.session(sessionId));
+      const d = await api.session(sessionId);
+      if (mine !== seq.current) return;
+      setDetail(d);
       setLoadError(null);
     } catch (e) {
+      if (mine !== seq.current) return;
       const dest = authRedirect(e);
       if (dest) router.replace(dest);
       else setLoadError(errorMessage(e));
@@ -74,9 +89,10 @@ export function ChargeSheet({ sessionId, onClose }: Props) {
         // transient; the next tick or the webhook will catch up
       }
       if (cancelled) return;
+      // The floor refetch only reloads this sheet again if the floor really changed.
+      void refetch();
       await load();
       if (cancelled) return;
-      void refetch();
       timer = setTimeout(() => void tick(), SYNC_MS);
     };
     timer = setTimeout(() => void tick(), SYNC_MS);
@@ -129,12 +145,90 @@ export function ChargeSheet({ sessionId, onClose }: Props) {
       },
     );
 
-  /** Refresh first: the amount to ring into Square must be the current one. */
+  const posCash = !!floor?.posCashAvailable && onStand;
+
+  /** Asks Square whether the cash sale went through. Says whether the bill is now paid, not paid, or the check itself failed. */
+  const checkHandoff = useCallback(async (quiet = false): Promise<"paid" | "not_paid" | "failed"> => {
+    if (checkBusy.current) return "failed";
+    checkBusy.current = true;
+    setChecking(true);
+    try {
+      const r = await api.cashHandoffCheck(sessionId);
+      if (r.paid) {
+        setHandoff("idle");
+        await load();
+        void refetch();
+      } else {
+        setCheckedNotPaid(true);
+      }
+      return r.paid ? "paid" : "not_paid";
+    } catch (e) {
+      const dest = authRedirect(e);
+      if (dest) router.replace(dest);
+      else if (!quiet) toast.show(errorMessage(e), "error");
+      return "failed";
+    } finally {
+      checkBusy.current = false;
+      setChecking(false);
+    }
+  }, [sessionId, load, refetch, router, toast]);
+
+  const startHandoff = async () => {
+    const r = await run(() => api.cashHandoff(sessionId), { refetch: false });
+    if (!r) return;
+    setHandoff("waiting");
+    setNotOpened(false);
+    setCheckedNotPaid(false);
+    window.location.href = r.url;
+  };
+
+  // While waiting: when this page comes back to the front, ask Square. If Square POS never took over
+  // (not installed or signed out) the page stays visible, so say so after a few seconds. Stop
+  // waiting after a while.
+  useEffect(() => {
+    if (handoff !== "waiting" || paid) return;
+    const back = () => {
+      if (document.visibilityState === "visible") void checkHandoff();
+    };
+    const onShow = (e: PageTransitionEvent) => {
+      if (e.persisted) back();
+    };
+    document.addEventListener("visibilitychange", back);
+    window.addEventListener("focus", back);
+    window.addEventListener("pageshow", onShow);
+    const notOpenedTimer = setTimeout(() => {
+      if (document.visibilityState === "visible") setNotOpened(true);
+    }, 4000);
+    const giveUp = setTimeout(() => setHandoff("gave_up"), 5 * 60_000);
+    return () => {
+      document.removeEventListener("visibilitychange", back);
+      window.removeEventListener("focus", back);
+      window.removeEventListener("pageshow", onShow);
+      clearTimeout(notOpenedTimer);
+      clearTimeout(giveUp);
+    };
+  }, [handoff, paid, checkHandoff]);
+
+  /** The manual path. On the Stand iPad ask Square first, so a sale it already has isn't recorded twice. */
+  const handleManualCash = async () => {
+    if (posCash) {
+      // Square being down must never stop cash. If the check fails, carry on: the server checks
+      // again and holds the record so a late POS answer can claim it.
+      const r = await checkHandoff(true);
+      if (r === "paid") return;
+    }
+    await handleCash();
+  };
+
+  /** Refresh first: the cash amount shown must be for the current bill. */
   const goCash = async () => {
     const d = await run(async () => {
+      const mine = ++seq.current;
       const fresh = await api.session(sessionId);
-      setDetail(fresh);
-      setLoadError(null);
+      if (mine === seq.current) {
+        setDetail(fresh);
+        setLoadError(null);
+      }
       return fresh;
     });
     if (d && d.session.status === "awaiting_payment" && !isCheckoutLive(d.session.checkout?.status)) setMode("cash");
@@ -148,6 +242,8 @@ export function ChargeSheet({ sessionId, onClose }: Props) {
     }
   };
 
+  const bill = detail ? billOf(detail) : null;
+  const cashLabelCents = bill && cashDueCents(bill.totalCents) !== bill.totalCents ? cashDueCents(bill.totalCents) : null;
   const title = session ? `Charge ${sessionTableNames(session)}` : "Charge";
 
   return (
@@ -188,9 +284,9 @@ export function ChargeSheet({ sessionId, onClose }: Props) {
             </Notice>
           ) : null}
 
-          <Total detail={detail} />
+          <Total detail={detail} cash={mode === "cash" && session?.status === "awaiting_payment"} />
 
-          {session && session.status === "awaiting_payment" && mode === "choose" ? <ItemsPanel session={session} reload={load} /> : null}
+          {session && session.status === "awaiting_payment" && mode === "choose" ? <ItemsPanel session={session} reload={load} busy={pending} /> : null}
 
           {session && session.status === "paid" ? (
             <PaidPanel detail={detail} onClose={onClose} />
@@ -218,11 +314,45 @@ export function ChargeSheet({ sessionId, onClose }: Props) {
             />
           ) : mode === "cash" ? (
             <div className="flex flex-col gap-4">
-              <CashInstruction detail={detail} />
-              <Button variant="primary" size="lg" disabled={pending || stale} onClick={() => void handleCash()}>
-                {pending ? "Saving…" : "Mark paid – cash"}
-              </Button>
-              <Button size="lg" disabled={pending} onClick={() => setMode("choose")}>
+              {posCash ? (
+                <>
+                  {handoff !== "idle" ? (
+                    <Notice tone="info" strong>
+                      {handoff === "waiting"
+                        ? "Finish the cash sale in Square, then come back here."
+                        : "Haven't heard back from Square. Check again, or take the cash another way."}
+                    </Notice>
+                  ) : null}
+                  {handoff === "waiting" && notOpened ? (
+                    <Notice tone="warn">Square didn&apos;t open on this iPad. Is Square POS installed and signed in?</Notice>
+                  ) : null}
+                  {handoff !== "idle" && checkedNotPaid && !checking ? (
+                    <Notice tone="warn">Square doesn&apos;t show this sale yet.</Notice>
+                  ) : null}
+                  {handoff === "idle" ? (
+                    <Button variant="primary" size="lg" disabled={pending || stale} onClick={() => void startHandoff()}>
+                      {pending ? "Opening…" : "Take cash in Square"}
+                    </Button>
+                  ) : (
+                    <>
+                      <Button variant="primary" size="lg" disabled={checking || pending} onClick={() => void checkHandoff()}>
+                        {checking ? "Checking…" : "Check again"}
+                      </Button>
+                      <Button size="lg" disabled={pending || checking || stale} onClick={() => void startHandoff()}>
+                        Open Square again
+                      </Button>
+                    </>
+                  )}
+                  <Button variant="ghost" disabled={pending || checking || stale} onClick={() => void handleManualCash()}>
+                    Mark paid – cash (drawer won&apos;t open)
+                  </Button>
+                </>
+              ) : (
+                <Button variant="primary" size="lg" disabled={pending || stale} onClick={() => void handleCash()}>
+                  {pending ? "Saving…" : "Mark paid – cash"}
+                </Button>
+              )}
+              <Button size="lg" disabled={pending || checking} onClick={() => setMode("choose")}>
                 Back
               </Button>
             </div>
@@ -250,6 +380,7 @@ export function ChargeSheet({ sessionId, onClose }: Props) {
               </Button>
               <Button size="lg" disabled={pending || stale} onClick={() => void goCash()}>
                 Cash
+                {cashLabelCents !== null ? <span className="tabular-nums"> · {formatCents(cashLabelCents)}</span> : null}
               </Button>
               {session?.currentTableId ? (
                 <Button size="lg" disabled={pending} onClick={() => void handleRelease()}>
@@ -281,7 +412,7 @@ export function ChargeSheet({ sessionId, onClose }: Props) {
   );
 }
 
-function Total({ detail }: { detail: SessionDetailDTO }) {
+function Total({ detail, cash }: { detail: SessionDetailDTO; cash: boolean }) {
   const s = detail.session;
   const b = detail.breakdown;
   // The stored bill is authoritative once stopped; the breakdown (table time only) is a fallback.
@@ -291,7 +422,15 @@ function Total({ detail }: { detail: SessionDetailDTO }) {
   const groups = groupItems(s.items);
   return (
     <section aria-label="Bill" className="rounded-2xl border border-line bg-bg p-4 text-center">
-      <p className="text-6xl font-bold tabular-nums">{bill ? formatCents(bill.totalCents) : "—"}</p>
+      {cash && bill ? <p className="text-lg font-semibold text-muted">Cash to collect</p> : null}
+      <p className="text-6xl font-bold tabular-nums">
+        {bill ? formatCents(cash ? cashDueCents(bill.totalCents) : bill.totalCents) : "—"}
+      </p>
+      {cash && bill && cashDueCents(bill.totalCents) !== bill.totalCents ? (
+        <p className="mt-1 text-base text-muted">
+          Bill is <span className="tabular-nums">{formatCents(bill.totalCents)}</span>. Cash rounds to the nearest 5c.
+        </p>
+      ) : null}
       <p className="mt-2 text-lg text-muted">
         {minutes !== null ? `${minutes} min billed` : "Minutes pending"}
         {bill ? ` · GST incl. ${formatCents(bill.gstCents)}` : ""}
@@ -324,47 +463,6 @@ function Total({ detail }: { detail: SessionDetailDTO }) {
         </ul>
       ) : null}
     </section>
-  );
-}
-
-/** What to ring into Square POS for a cash sale: table hire at the table amount, then each item. */
-function CashInstruction({ detail }: { detail: SessionDetailDTO }) {
-  const bill = billOf(detail);
-  const groups = groupItems(detail.session.items);
-  if (!bill) return null;
-  if (groups.length === 0) {
-    return (
-      <Notice tone="info" strong>
-        Ring &lsquo;Table hire&rsquo; for {formatCents(bill.tableCents)} as Cash in Square POS — the drawer will open. Then tap Mark
-        paid – cash.
-      </Notice>
-    );
-  }
-  return (
-    <Notice tone="info">
-      <p className="text-lg font-semibold">Ring these up as Cash in Square POS:</p>
-      <ul className="mt-2 divide-y divide-[#3a77b0]/40 text-lg">
-        {bill.tableCents > 0 ? (
-          <li className="flex justify-between gap-3 py-1.5">
-            <span>Table hire</span>
-            <span className="tabular-nums">{formatCents(bill.tableCents)}</span>
-          </li>
-        ) : null}
-        {groups.map((g) => (
-          <li key={g.key} className="flex justify-between gap-3 py-1.5">
-            <span>
-              {g.name} × {g.quantity}
-            </span>
-            <span className="tabular-nums">{formatCents(g.cents)}</span>
-          </li>
-        ))}
-        <li className="flex justify-between gap-3 py-1.5 font-semibold">
-          <span>Total</span>
-          <span className="tabular-nums">{formatCents(bill.totalCents)}</span>
-        </li>
-      </ul>
-      <p className="mt-2 text-lg font-semibold">The drawer will open. Then tap Mark paid – cash.</p>
-    </Notice>
   );
 }
 
@@ -420,6 +518,14 @@ function PaidPanel({ detail, onClose }: { detail: SessionDetailDTO; onClose: () 
         Paid by {s.settledMethod ?? "—"}
         {s.settledByName ? ` · ${s.settledByName}` : ""}
       </p>
+      {s.settledMethod === "cash" && s.settledCents !== null ? (
+        <p className="text-lg text-muted">
+          Cash taken <span className="tabular-nums">{formatCents(s.settledCents)}</span>
+        </p>
+      ) : null}
+      {s.settledMethod === "cash" && s.squareCash?.state === "failed" ? (
+        <Notice tone="warn">Not in Square yet. A manager can retry in Admin → Items.</Notice>
+      ) : null}
       <Button variant="primary" size="lg" onClick={onClose}>
         Done
       </Button>

@@ -9,6 +9,10 @@ export function proxy(req: NextRequest) {
   const hasDevice = req.cookies.has("tt_device");
   const hasSession = req.cookies.has("tt_session");
 
+  // Square POS comes back here in Safari, which shares no cookies with the home-screen app. The
+  // page needs none: what it posts is checked by its own signed token.
+  if (pathname === "/pos/return") return NextResponse.next();
+
   if (!hasDevice && pathname !== "/enrol") {
     return NextResponse.redirect(new URL("/enrol", req.url));
   }

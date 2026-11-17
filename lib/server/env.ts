@@ -29,6 +29,14 @@ const squareSchema = z.object({
   SQUARE_LOCATION_ID: z.string().min(1, "is empty"),
 });
 
+/** Optional: cash through the Square POS app on the drawer iPad (see lib/server/pos-cash.ts). */
+const posSchema = z.object({
+  /** The Square application id (Developer Console → Credentials). Not a secret, but kept server-side. */
+  SQUARE_APPLICATION_ID: z.string().min(1),
+  /** Where the iPads reach the app, e.g. https://timer.example.com. Defaults to the webhook URL's origin. */
+  APP_ORIGIN: z.string().regex(/^https:\/\/[^/]+$/, "must be https://host with no path").optional(),
+});
+
 const webhookSchema = z.object({
   SQUARE_WEBHOOK_SIGNATURE_KEY: z.string().min(1, "is empty"),
   /** Must match the webhook subscription URL in the Square Developer Console exactly. */
@@ -89,6 +97,49 @@ export function squareEnv(): SquareEnv {
 export function squareEnvironmentOrNull(): SquareEnv["SQUARE_ENVIRONMENT"] | null {
   const v = process.env.SQUARE_ENVIRONMENT;
   return v === "sandbox" || v === "production" ? v : null;
+}
+
+/**
+ * Peek without validating or logging: is there any point asking Square? Background jobs use this so
+ * a venue running without Square doesn't log a configuration error on every poll.
+ */
+export function squareLooksConfigured(): boolean {
+  return squareEnvironmentOrNull() !== null && !!process.env.SQUARE_ACCESS_TOKEN && !!process.env.SQUARE_LOCATION_ID;
+}
+
+export interface PosCashConfig {
+  applicationId: string;
+  locationId: string;
+  /** Must match the Web Callback URL registered under Point of Sale API in the Developer Console exactly. */
+  callbackUrl: string;
+}
+
+/**
+ * Non-throwing, not cached (three env reads). null = handing cash to Square POS isn't on offer:
+ * Square isn't configured, there is no application id, or the app's own address isn't known.
+ */
+export function posCashConfig(): PosCashConfig | null {
+  if (!squareLooksConfigured()) return null;
+  const parsed = posSchema.safeParse({
+    SQUARE_APPLICATION_ID: process.env.SQUARE_APPLICATION_ID,
+    APP_ORIGIN: process.env.APP_ORIGIN || undefined,
+  });
+  if (!parsed.success) return null;
+  let origin = parsed.data.APP_ORIGIN ?? null;
+  if (!origin) {
+    try {
+      const u = new URL(process.env.SQUARE_WEBHOOK_URL ?? "");
+      origin = u.protocol === "https:" ? u.origin : null;
+    } catch {
+      origin = null;
+    }
+  }
+  if (!origin) return null;
+  return {
+    applicationId: parsed.data.SQUARE_APPLICATION_ID,
+    locationId: process.env.SQUARE_LOCATION_ID as string,
+    callbackUrl: `${origin}/pos/return`,
+  };
 }
 
 /** null when webhook verification isn't configured (the route then refuses every event). */

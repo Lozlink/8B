@@ -203,6 +203,47 @@ describe("currentActor", () => {
   });
 });
 
+describe("the staff session lasts a fixed 20 hours from login", () => {
+  const HOUR = 60 * 60 * 1000;
+  const start = new Date("2026-11-20T10:00:00+11:00");
+
+  it("is still good after 19 hours of use, is never re-issued, and ends at 20 hours", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      vi.setSystemTime(start);
+      await login(h.staff.actor.staffId, STAFF_PIN);
+      const first = mocks.store.get("tt_session");
+
+      for (const hours of [2, 14.5, 19.9]) {
+        vi.setSystemTime(new Date(start.getTime() + hours * HOUR));
+        expect(await currentActor()).toMatchObject({ staffId: h.staff.actor.staffId });
+        // Using it doesn't extend it.
+        expect(mocks.store.get("tt_session")).toBe(first);
+      }
+
+      vi.setSystemTime(new Date(start.getTime() + 20.1 * HOUR));
+      expect(await currentActor()).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("manager elevation stays at 10 minutes", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      vi.setSystemTime(start);
+      const actor = await login(h.staff.actor.staffId, STAFF_PIN);
+      await elevate(actor, MANAGER_PIN);
+      vi.setSystemTime(new Date(start.getTime() + 9 * 60 * 1000));
+      await expect(requireElevation(actor)).resolves.toMatchObject({ id: h.staff.manager.id });
+      vi.setSystemTime(new Date(start.getTime() + 11 * 60 * 1000));
+      await expect(requireElevation(actor)).rejects.toMatchObject({ status: 403, code: "manager_required" });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
 describe("manager step-up", () => {
   async function staffActor(): Promise<Actor> {
     return login(staffId(), STAFF_PIN);

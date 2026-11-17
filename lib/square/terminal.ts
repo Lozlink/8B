@@ -30,6 +30,15 @@ function toState(c: SdkCheckout | undefined, what: string): SquareCheckoutState 
   };
 }
 
+/**
+ * For calls made while the bill's row is locked (create, cancel, and the read that follows a
+ * refused cancel). The client default is 12 s plus one SDK retry, and the SDK sleeps for whatever
+ * Retry-After says (up to 60 s) before a retry, all of which would be spent holding the lock.
+ * So: one try, 8 s. Staff pressing the button again is the retry, and the idempotency key makes
+ * that safe.
+ */
+const UNDER_LOCK = { timeoutInSeconds: 8, maxRetries: 0 } as const;
+
 export interface CreateCheckoutInput {
   /** `${sessionId}-a${attempt}` — ≤ 64 chars; stable until the attempt is committed. */
   idempotencyKey: string;
@@ -62,17 +71,21 @@ export async function createTerminalCheckout(input: CreateCheckoutInput): Promis
           ...(input.orderId ? { showItemizedCart: true } : {}),
         },
       },
-    });
+    }, UNDER_LOCK);
     return toState(res.checkout, what);
   } catch (e) {
     throw toUpstreamError(e, what);
   }
 }
 
-export async function getTerminalCheckout(checkoutId: string): Promise<SquareCheckoutState> {
+/**
+ * Reads a checkout. `underLock` is for a caller holding the bill's lock: one 8 s try instead of
+ * the client default. Background and panel checks run outside the lock and leave it off.
+ */
+export async function getTerminalCheckout(checkoutId: string, opts: { underLock?: boolean } = {}): Promise<SquareCheckoutState> {
   const what = "check the card payment";
   try {
-    const res = await square().terminal.checkouts.get({ checkoutId });
+    const res = await square().terminal.checkouts.get({ checkoutId }, opts.underLock ? UNDER_LOCK : undefined);
     return toState(res.checkout, what);
   } catch (e) {
     throw toUpstreamError(e, what);
@@ -83,16 +96,16 @@ export async function getTerminalCheckout(checkoutId: string): Promise<SquareChe
  * Requests cancellation and returns Square's view afterwards. A PENDING checkout becomes CANCELED;
  * an IN_PROGRESS one becomes CANCEL_REQUESTED (not final — the buyer may still finish). Square
  * doesn't document what cancelling a COMPLETED checkout returns, so on a 4xx we re-read the
- * checkout and let the caller reconcile.
+ * checkout and let the caller reconcile. Always called with the bill locked.
  */
 export async function cancelTerminalCheckout(checkoutId: string): Promise<SquareCheckoutState> {
   const what = "cancel the card checkout";
   try {
-    const res = await square().terminal.checkouts.cancel({ checkoutId });
+    const res = await square().terminal.checkouts.cancel({ checkoutId }, UNDER_LOCK);
     return toState(res.checkout, what);
   } catch (e) {
     if (isSquareStatus(e, 400) || isSquareStatus(e, 409)) {
-      return getTerminalCheckout(checkoutId);
+      return getTerminalCheckout(checkoutId, { underLock: true });
     }
     throw toUpstreamError(e, what);
   }

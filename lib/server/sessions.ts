@@ -1,5 +1,6 @@
 import "server-only";
 import { assertCan, isCheckoutLive, isCheckoutStatus, type CheckoutStatus } from "@/lib/domain/machine";
+import { cashDueCents } from "@/lib/domain/bill";
 import type { MarkPaidOutcome, SettledMethod } from "@/lib/domain/types";
 import { formatDuration, makeSnapshot, price, type PriceResult, type PricingInterval } from "@/lib/pricing";
 import { formatTime } from "@/lib/format";
@@ -11,6 +12,8 @@ import type { Actor, Manager } from "./auth";
 import { audit } from "./audit";
 import { db, withTx, type Db, type Tx } from "./db";
 import { squareEnv } from "./env";
+import { enqueueCashRecord, markCashReversed } from "./square-cash";
+import { isKeyReused, isSquareRejection, squareStatus } from "./square-errors";
 import { badRequest, conflict, notFound, AppError } from "./errors";
 import {
   auditView,
@@ -59,9 +62,9 @@ export function setTerminalGatewayForTests(g: TerminalGateway): void {
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-const by = (a: Actor) => ({ actorStaffId: a.staffId, deviceLabel: a.deviceLabel });
+const by = (a: Pick<Actor, "staffId" | "deviceLabel">) => ({ actorStaffId: a.staffId, deviceLabel: a.deviceLabel });
 
-async function mustLock(tx: Tx, id: string): Promise<SessionRow> {
+export async function mustLock(tx: Tx, id: string): Promise<SessionRow> {
   if (!UUID_RE.test(id)) throw notFound("Session not found.");
   const s = await lockSession(tx, id);
   if (!s) throw notFound("Session not found.");
@@ -297,6 +300,10 @@ type Source = "square_webhook" | "square_api";
  * Applies Square's view of a checkout. Status only moves forward (webhooks can arrive out of
  * order), except that CANCELED may still become COMPLETED (Square: TIMED_OUT isn't final).
  * Returns true if this call is what recorded the checkout as COMPLETED.
+ *
+ * Writes nothing when Square's view is what we already hold. Every write to this table used to
+ * wake every iPad, and the common answer by far is "still pending". The background sync does its
+ * own stamping of `last_synced_at` when it claims a checkout, so nothing here needs to.
  */
 async function applyCheckoutState(
   tx: Tx,
@@ -304,15 +311,22 @@ async function applyCheckoutState(
   row: CheckoutRow,
   state: Pick<SquareCheckoutState, "status" | "cancelReason">,
   source: Source,
-  actor: Actor | null,
+  actor: Pick<Actor, "staffId" | "deviceLabel"> | null,
+  /** Why, when the status didn't come straight from Square. Goes on the audit row. */
+  note: string | null = null,
 ): Promise<boolean> {
   const next = RANK[state.status] > RANK[row.status] ? state.status : row.status;
-  const cancelReason = next === "CANCELED" ? state.cancelReason : row.cancel_reason;
+  const cancelReason = next === "CANCELED" ? state.cancelReason ?? row.cancel_reason : row.cancel_reason;
+  if (next === row.status) {
+    if (cancelReason !== row.cancel_reason) {
+      await tx`update public.terminal_checkouts set cancel_reason = ${cancelReason} where id = ${row.id}`;
+    }
+    return false;
+  }
   await tx`
     update public.terminal_checkouts
     set status = ${next}, cancel_reason = ${cancelReason}, last_synced_at = now()
     where id = ${row.id}`;
-  if (next === row.status) return false;
 
   const base = {
     actorStaffId: actor?.staffId ?? null,
@@ -328,6 +342,7 @@ async function applyCheckoutState(
       action: next === "CANCELED" ? "checkout.canceled" : "checkout.status",
       before: { status: row.status },
       after: { ...checkoutInfo, status: next, cancel_reason: cancelReason },
+      reason: note,
     });
     return false;
   }
@@ -337,13 +352,20 @@ async function applyCheckoutState(
     await tx`
       update public.sessions set
         status = 'paid', settled_method = 'card', settled_via = ${source}, settled_by = null,
-        settled_at = ${now}, current_table_id = null
+        settled_at = ${now}, settled_cents = ${row.amount_cents}, current_table_id = null
       where id = ${s.id}`;
     await audit(tx, {
       ...base,
       action: "session.paid",
       before: auditView(s),
-      after: { ...checkoutInfo, status: "paid", settled_method: "card", settled_via: source, settled_at: now },
+      after: {
+        ...checkoutInfo,
+        status: "paid",
+        settled_method: "card",
+        settled_via: source,
+        settled_at: now,
+        settled_cents: row.amount_cents,
+      },
     });
     if (row.amount_cents !== s.total_cents) {
       // The money was taken, so the bill is settled — but for a different amount. This is an older
@@ -376,7 +398,10 @@ async function applyCheckoutState(
     // A staff settlement only succeeds when Square did NOT report this checkout as completed at that
     // moment (markPaid cancels first and takes the "already paid" path otherwise). So a COMPLETED
     // arriving afterwards may be a second payment — always flag it for a human to check.
-    const settledBySquare = s.settled_via === "square_webhook" || s.settled_via === "square_api";
+    // Cash taken through Square POS is also settled "by Square", but a card completing after it is
+    // a second payment, never a confirmation.
+    const settledBySquare =
+      s.settled_method === "card" && (s.settled_via === "square_webhook" || s.settled_via === "square_api");
     if (settledBySquare && completedCount <= 1) {
       await audit(tx, { ...base, action: "payment.confirmed_by_square", after: { ...checkoutInfo, settled_via: s.settled_via } });
     } else {
@@ -391,7 +416,7 @@ async function applyCheckoutState(
         },
         reason:
           s.settled_method === "cash"
-            ? "A card payment completed on the Terminal after this session was marked paid in cash. Check for a double payment and refund one in Square."
+            ? "A card payment completed on the Terminal after this session was paid in cash. Check for a double payment and refund one in Square."
             : s.settled_via === "staff"
               ? "Square reported a card payment completing on the Terminal after staff marked this bill paid by card. If the card was taken on the Terminal it's the same payment and nothing needs doing; if it was taken another way (e.g. the Stand reader), the customer paid twice — refund one in Square."
               : "More than one card payment completed for this session. Refund the duplicate in Square.",
@@ -409,7 +434,7 @@ async function applyCheckoutState(
   return true;
 }
 
-interface LiveResolution {
+export interface LiveResolution {
   /** A live checkout turned out to be COMPLETED — the session is now paid by card. */
   completed: boolean;
   /** Still waiting on the Terminal to confirm a cancel. */
@@ -417,8 +442,33 @@ interface LiveResolution {
   warnings: string[];
 }
 
+const NOT_FOUND_REASON = "Not found in Square";
+const NOT_FOUND_NOTE =
+  "Square has no record of this card request, more than 10 minutes after it was sent, so it can't take a payment. Treated as cancelled.";
+
+/**
+ * Square answered 404 NOT_FOUND for this checkout: it doesn't exist there. Only that exact answer
+ * counts. A timeout, a 5xx or a 401/403 says nothing about the checkout and must never cancel it.
+ */
+function isCheckoutNotFound(e: unknown): boolean {
+  if (squareStatus(e) !== 404 || !(e instanceof AppError)) return false;
+  const codes = e.detail?.codes;
+  return Array.isArray(codes) && codes.includes("NOT_FOUND");
+}
+
+/**
+ * Sent more than 10 minutes ago, by the database's clock. A checkout expires after 5, so one this
+ * old that Square can't find will never complete. A younger one is left alone: Square may simply
+ * not have caught up with a request it answered slowly.
+ */
+async function isOldCheckout(tx: Tx, checkoutId: string): Promise<boolean> {
+  const [r] = await tx<{ old: boolean }[]>`
+    select created_at < now() - interval '10 minutes' as old from public.terminal_checkouts where id = ${checkoutId}`;
+  return r?.old === true;
+}
+
 /** Cancels every live checkout for the session, reconciling with what Square says happened. */
-async function cancelLiveCheckouts(tx: Tx, s: SessionRow, actor: Actor): Promise<LiveResolution> {
+export async function cancelLiveCheckouts(tx: Tx, s: SessionRow, actor: Pick<Actor, "staffId" | "deviceLabel">): Promise<LiveResolution> {
   const res: LiveResolution = { completed: false, cancelPending: false, warnings: [] };
   const live = (await getCheckouts(tx, s.id)).filter((c) => isCheckoutLive(c.status));
   for (const c of live) {
@@ -426,6 +476,11 @@ async function cancelLiveCheckouts(tx: Tx, s: SessionRow, actor: Actor): Promise
     try {
       state = await gateway.cancel(c.id);
     } catch (e) {
+      if (isCheckoutNotFound(e) && (await isOldCheckout(tx, c.id))) {
+        // Nothing to cancel: Square doesn't have it. Close it here so the bill isn't stuck behind it.
+        await applyCheckoutState(tx, s, c, { status: "CANCELED", cancelReason: NOT_FOUND_REASON }, "square_api", actor, NOT_FOUND_NOTE);
+        continue;
+      }
       const msg = e instanceof AppError ? e.message : "Couldn't reach Square.";
       res.warnings.push(`${msg} Cancel the request on the Terminal by hand.`);
       await audit(tx, {
@@ -452,16 +507,21 @@ async function cancelLiveCheckouts(tx: Tx, s: SessionRow, actor: Actor): Promise
   return res;
 }
 
-function buildNote(tables: string[], billedMinutes: number, openedAt: Date, closedAt: Date | null, tz: string): string {
+export function buildNote(tables: string[], billedMinutes: number, openedAt: Date, closedAt: Date | null, tz: string): string {
   const times = `${formatTime(openedAt, tz)}–${closedAt ? formatTime(closedAt, tz) : "now"}`;
   return [tables.join(" → "), formatDuration(billedMinutes * 60_000), times].join(" · ");
 }
 
-/** Square has this idempotency key on file against a different request body. */
-function isKeyReused(e: unknown): boolean {
-  if (!(e instanceof AppError) || e.code !== "square_error") return false;
-  const codes = e.detail?.codes;
-  return Array.isArray(codes) && codes.includes("IDEMPOTENCY_KEY_REUSED");
+/** The note Square shows against a bill: the tables it was on, the time billed and the clock times. */
+export async function sessionNote(tx: Tx, s: SessionRow, intervals: IntervalRow[], billedMinutes: number): Promise<string> {
+  const names = await tableNames(tx, [...new Set(intervals.map((i) => i.table_id))]);
+  return buildNote(
+    intervals.map((i) => names.get(i.table_id) ?? "Table").filter((n, idx, arr) => arr.indexOf(n) === idx),
+    billedMinutes,
+    s.opened_at,
+    s.closed_at,
+    s.rate_snapshot?.settings.timezone ?? "Australia/Sydney",
+  );
 }
 
 type KeyConflict = { kind: "key_conflict" };
@@ -469,21 +529,8 @@ type KeyConflict = { kind: "key_conflict" };
 const KEY_CONFLICT_MESSAGE =
   "Square already has a card request for this bill that the app didn't record. Check the Terminal and cancel anything waiting there, then charge again.";
 
-/**
- * Square refused the request outright (a 4xx). Timeouts, network failures, 5xx and rate limiting
- * don't count: the request may still have gone through, or will if tried again.
- */
-function isSquareRejection(e: unknown): e is AppError {
-  if (!(e instanceof AppError) || e.code !== "square_error") return false;
-  // A reused key means Square has already seen a different request for this attempt. That's not a
-  // verdict on this one, and whatever the earlier request created may still be live.
-  if (isKeyReused(e)) return false;
-  const status = e.detail?.status;
-  return typeof status === "number" && status >= 400 && status < 500 && status !== 408 && status !== 429;
-}
-
 /** The lines of the Square order for a bill: table time first, then each item as it sits on the bill. */
-function orderLines(tableCents: number, tableHireVariationId: string | null, note: string, items: SessionItemRow[]): OrderLineInput[] {
+export function orderLines(tableCents: number, tableHireVariationId: string | null, note: string, items: SessionItemRow[]): OrderLineInput[] {
   const lines: OrderLineInput[] = [];
   if (tableCents > 0) {
     lines.push({
@@ -505,15 +552,14 @@ function orderLines(tableCents: number, tableHireVariationId: string | null, not
 }
 
 /**
- * Prices, sends a new checkout attempt to the Terminal and records it. Caller holds the lock.
- *
- * Returns `key_conflict` (rather than throwing) when Square says an idempotency key was already used
- * for a different request: nothing else is sent, the attempt number is skipped so the next try uses
- * fresh keys, and the caller must let the transaction COMMIT before telling staff.
+ * Re-prices a closed bill from its stored rates and writes the result if it moved, so the amount
+ * about to be asked for is the bill as it stands. Caller holds the lock.
  */
-async function sendAttempt(tx: Tx, s: SessionRow, actor: Actor, settings: Settings): Promise<SquareCheckoutState | KeyConflict> {
-  const deviceId = settings.terminalDeviceId;
-  if (!deviceId) throw conflict("No Terminal is paired.");
+export async function repriceBill(
+  tx: Tx,
+  s: SessionRow,
+  actor: Pick<Actor, "staffId" | "deviceLabel">,
+): Promise<{ intervals: IntervalRow[]; r: PriceResult; totalCents: number }> {
   const intervals = await getIntervals(tx, s.id);
   const r = repriceClosed(s, intervals);
   const totalCents = r.totalCents + s.items_cents;
@@ -530,19 +576,24 @@ async function sendAttempt(tx: Tx, s: SessionRow, actor: Actor, settings: Settin
       after: { total_cents: totalCents, items_cents: s.items_cents, billed_minutes: r.billedMinutes },
     });
   }
+  return { intervals, r, totalCents };
+}
+
+/**
+ * Prices, sends a new checkout attempt to the Terminal and records it. Caller holds the lock.
+ *
+ * Returns `key_conflict` (rather than throwing) when Square says an idempotency key was already used
+ * for a different request: nothing else is sent, the attempt number is skipped so the next try uses
+ * fresh keys, and the caller must let the transaction COMMIT before telling staff.
+ */
+async function sendAttempt(tx: Tx, s: SessionRow, actor: Actor, settings: Settings): Promise<SquareCheckoutState | KeyConflict> {
+  const deviceId = settings.terminalDeviceId;
+  if (!deviceId) throw conflict("No Terminal is paired.");
+  const { intervals, r, totalCents } = await repriceBill(tx, s, actor);
   if (totalCents <= 0) throw conflict("There's nothing to charge on this bill.");
 
   const attempt = s.checkout_attempt + 1;
-  const tableIds = [...new Set(intervals.map((i) => i.table_id))];
-  const names = await tableNames(tx, tableIds);
-  const tz = s.rate_snapshot?.settings.timezone ?? "Australia/Sydney";
-  const note = buildNote(
-    intervals.map((i) => names.get(i.table_id) ?? "Table").filter((n, idx, arr) => arr.indexOf(n) === idx),
-    r.billedMinutes,
-    s.opened_at,
-    s.closed_at,
-    tz,
-  );
+  const note = await sessionNote(tx, s, intervals, r.billedMinutes);
   const request = { amountCents: totalCents, deviceId, referenceId: s.id, note };
 
   // The Square calls happen while we hold the row lock. If one fails, the transaction rolls back and
@@ -677,9 +728,11 @@ export async function resendCheckout(actor: Actor, id: string): Promise<ChargeOu
     if (!settings.terminalDeviceId) throw conflict("No Terminal is paired.");
     const r = await cancelLiveCheckouts(tx, s, actor);
     if (r.completed) return { kind: "already_paid_by_card" };
-    if (r.cancelPending || r.warnings.length > 0) {
-      // Never put a second request on the Terminal while the first could still take money. Return
-      // (not throw) so the cancel we already sent to Square — its status and audit row — commits.
+    // Whatever the cancels reported, look at what the rows say now: if any request for this bill
+    // could still take money, a second one must not go on the Terminal.
+    const stillLive = (await getCheckouts(tx, id)).some((c) => isCheckoutLive(c.status));
+    if (r.cancelPending || r.warnings.length > 0 || stillLive) {
+      // Return (not throw) so the cancel we already sent to Square — its status and audit row — commits.
       return {
         kind: "refused",
         message:
@@ -716,14 +769,27 @@ export async function cancelCheckout(actor: Actor, id: string): Promise<{ status
  * bill. That's safe because applyCheckoutState only ever moves a checkout's status forward.
  */
 async function reconcileCheckout(checkoutId: string, sessionId: string, actor: Actor | null): Promise<void> {
-  const state = await gateway.get(checkoutId);
+  let state: SquareCheckoutState | null = null;
+  let notFound: unknown = null;
+  try {
+    state = await gateway.get(checkoutId);
+  } catch (e) {
+    if (!isCheckoutNotFound(e)) throw e;
+    notFound = e;
+  }
   await withTx(async (tx) => {
     const s = await lockSession(tx, sessionId);
     if (!s) return;
     const [c] = await tx<CheckoutRow[]>`
       select * from public.terminal_checkouts where id = ${checkoutId} and session_id = ${sessionId} for update`;
     if (!c || !isCheckoutLive(c.status)) return; // settled meanwhile (webhook / another iPad)
-    await applyCheckoutState(tx, s, c, state, "square_api", actor);
+    if (state) {
+      await applyCheckoutState(tx, s, c, state, "square_api", actor);
+      return;
+    }
+    // Square says it has no such checkout. Young ones fail as they always have.
+    if (!(await isOldCheckout(tx, c.id))) throw notFound;
+    await applyCheckoutState(tx, s, c, { status: "CANCELED", cancelReason: NOT_FOUND_REASON }, "square_api", actor, NOT_FOUND_NOTE);
   });
 }
 
@@ -1007,7 +1073,14 @@ export async function markPaid(
   actor: Actor,
   id: string,
   method: SettledMethod,
-  opts: { cardConfirmed: boolean },
+  opts: {
+    cardConfirmed: boolean;
+    /**
+     * Cash only: hold the sale back from Square for this long. Used when the bill was handed to
+     * Square POS a moment ago and POS may yet report a sale of its own (see pos-cash.ts).
+     */
+    holdSquareCashSeconds?: number;
+  },
   now = new Date(),
 ): Promise<MarkPaidOutcome & { warnings: string[] }> {
   if (method === "card" && !opts.cardConfirmed) {
@@ -1024,11 +1097,19 @@ export async function markPaid(
     const live = await cancelLiveCheckouts(tx, s, actor);
     if (live.completed) return { kind: "already_paid_by_card", warnings: live.warnings };
 
+    const billCents = s.total_cents ?? 0;
+    // Cash is collected to the nearest 5c; a card is taken for the exact bill.
+    const settledCents = method === "cash" ? cashDueCents(billCents) : billCents;
     await tx`
       update public.sessions set
         status = 'paid', settled_method = ${method}, settled_via = 'staff', settled_by = ${actor.staffId},
-        settled_at = ${now}, current_table_id = null
+        settled_at = ${now}, settled_cents = ${settledCents}, current_table_id = null
       where id = ${id}`;
+    // Cash goes into Square too, but not from here: this only writes the outbox row, in the same
+    // transaction as the payment. The Square calls happen after the response (see square-cash.ts),
+    // so Square being slow or down never holds up the till.
+    const squareCashSeq =
+      method === "cash" ? await queueCashForSquare(tx, s, actor, settledCents, opts.holdSquareCashSeconds ?? 0) : null;
     await audit(tx, {
       ...by(actor),
       action: "session.mark_paid",
@@ -1041,7 +1122,9 @@ export async function markPaid(
         settled_via: "staff",
         settled_at: now,
         total_cents: s.total_cents,
+        settled_cents: settledCents,
         card_confirmed_by_staff: method === "card" ? true : undefined,
+        square_cash_seq: squareCashSeq ?? undefined,
       },
       reason: live.cancelPending ? "Marked paid while the Terminal was still cancelling a card request." : null,
     });
@@ -1049,8 +1132,26 @@ export async function markPaid(
     if (live.cancelPending) {
       warnings.push("The Terminal was still cancelling the card request. If the customer taps their card anyway, the app will flag it.");
     }
-    return { kind: "paid", method, via: "staff", warnings };
+    return { kind: "paid", method, via: "staff", amountCents: settledCents, warnings };
   });
+}
+
+/**
+ * Writes the outbox row for a cash payment, with the order lines as they stand right now. Returns
+ * the record's sequence number, or null when there is nothing to send to Square.
+ */
+async function queueCashForSquare(tx: Tx, s: SessionRow, actor: Actor, cashCents: number, holdSeconds: number): Promise<number | null> {
+  const billCents = s.total_cents ?? 0;
+  if (cashCents <= 0 || billCents <= 0) return null;
+  const intervals = await getIntervals(tx, s.id);
+  const note = await sessionNote(tx, s, intervals, s.billed_minutes ?? 0);
+  let lines: OrderLineInput[] | null = null;
+  const tableCents = billCents - s.items_cents;
+  if ((await getSettings(tx)).itemiseCharges && tableCents >= 0) {
+    const { table_hire_variation_id: tableHireVariationId } = await getCatalogState(tx);
+    lines = orderLines(tableCents, tableHireVariationId, note, await getLiveItems(tx, s.id));
+  }
+  return enqueueCashRecord(tx, { sessionId: s.id, amountCents: cashCents, billCents, note, lines, staffId: actor.staffId, holdSeconds });
 }
 
 // ---------------------------------------------------------------------------
@@ -1113,8 +1214,11 @@ export async function reversePaid(actor: Actor, manager: Manager, id: string, re
     assertCan(s.status, "reverse_paid");
     await tx`
       update public.sessions set
-        status = 'awaiting_payment', settled_method = null, settled_via = null, settled_by = null, settled_at = null
+        status = 'awaiting_payment', settled_method = null, settled_via = null, settled_by = null, settled_at = null,
+        settled_cents = null
       where id = ${id}`;
+    // A cash sale the app put (or is putting) into Square has to come back out of it.
+    const squareCash = s.settled_method === "cash" ? await markCashReversed(tx, id) : null;
     await audit(tx, {
       ...by(actor),
       approvedByStaffId: manager.id,
@@ -1122,7 +1226,7 @@ export async function reversePaid(actor: Actor, manager: Manager, id: string, re
       entity: "session",
       entityId: id,
       before: auditView(s),
-      after: { status: "awaiting_payment" },
+      after: { status: "awaiting_payment", square_cash: squareCash ?? undefined },
       reason,
     });
   });

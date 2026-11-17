@@ -9,6 +9,8 @@ import type {
   SessionDTO,
   SessionItemDTO,
   SettledMethod,
+  SquareCashDTO,
+  SquareCashState,
   SettledVia,
   SummaryDTO,
   SummarySessionRow,
@@ -18,6 +20,7 @@ import { price, type RateSnapshot } from "@/lib/pricing";
 import { businessWindow, currentBusinessDate, formatYMD } from "@/lib/domain/business-day";
 import type postgres from "postgres";
 import { db, type Db } from "./db";
+import { posCashConfig } from "./env";
 import { notFound, badRequest } from "./errors";
 import {
   getPricingConfig,
@@ -33,9 +36,36 @@ import {
 const iso = (d: Date | null): string | null => (d ? d.toISOString() : null);
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-interface SessionJoinRow extends SessionRow {
+/** The latest cash record for a session, as joined onto it (all null when there is none). */
+interface CashJoin {
+  cash_state: SquareCashState | null;
+  cash_amount_cents: number | null;
+  cash_error: string | null;
+}
+
+interface SessionJoinRow extends SessionRow, CashJoin {
   opened_by_name: string;
   settled_by_name: string | null;
+}
+
+/**
+ * Joins the latest `square_cash_records` row for session alias `s` as `sc`. One index probe per
+ * session on (session_id, seq); no extra query.
+ */
+const cashJoinSql = (q: Db) => q`
+  left join lateral (
+    select c.state, c.amount_cents, c.last_error
+    from public.square_cash_records c
+    where c.session_id = s.id
+    order by c.seq desc limit 1
+  ) sc on true`;
+const cashColumnsSql = (q: Db) => q`sc.state as cash_state, sc.amount_cents as cash_amount_cents, sc.last_error as cash_error`;
+
+function squareCashDTO(r: CashJoin): SquareCashDTO | null {
+  if (!r.cash_state || r.cash_amount_cents === null) return null;
+  const waiting = r.cash_state === "pending" || r.cash_state === "failed";
+  // Once the sale is in Square an old error is history, not something staff need to act on.
+  return { state: r.cash_state, amountCents: r.cash_amount_cents, error: waiting ? r.cash_error : null };
 }
 
 function checkoutDTO(c: CheckoutRow): CheckoutDTO {
@@ -90,10 +120,11 @@ export function productDTO(p: ProductRow): ProductDTO {
 /** Loads sessions matching `where` (a fragment over alias `s`) with intervals, items and latest checkout. */
 async function loadSessions(q: Db, where: postgres.Fragment): Promise<SessionDTO[]> {
   const rows = await q<SessionJoinRow[]>`
-    select s.*, op.name as opened_by_name, sb.name as settled_by_name
+    select s.*, op.name as opened_by_name, sb.name as settled_by_name, ${cashColumnsSql(q)}
     from public.sessions s
     join public.staff op on op.id = s.opened_by
     left join public.staff sb on sb.id = s.settled_by
+    ${cashJoinSql(q)}
     where ${where}
     order by s.opened_at`;
   if (rows.length === 0) return [];
@@ -149,6 +180,8 @@ async function loadSessions(q: Db, where: postgres.Fragment): Promise<SessionDTO
     settledVia: r.settled_via,
     settledAt: iso(r.settled_at),
     settledByName: r.settled_by_name,
+    settledCents: r.settled_cents,
+    squareCash: squareCashDTO(r),
     voidReason: r.void_reason,
     note: r.note,
     intervals: bySession.get(r.id) ?? [],
@@ -177,6 +210,7 @@ export async function getFloor(): Promise<FloorDTO> {
     unpaidOffTableCount: unpaid?.n ?? 0,
     pricing: { settings: pricingSettingsOf(settings), rateCards },
     terminalPaired: !!settings.terminalDeviceId,
+    posCashAvailable: posCashConfig() !== null,
     products: products.map(productDTO),
   };
 }
@@ -353,10 +387,20 @@ export async function getSummary(dateParam: string | null): Promise<SummaryDTO> 
       where i.removed_at is null and s.status <> 'void' and s.closed_at >= ${from} and s.closed_at < ${to}
       group by i.product_id
       order by cents desc, name, i.product_id`,
-    q<(SummaryRow & { settled_method: SettledMethod; settled_via: SettledVia; settled_at: Date; settled_by_name: string | null })[]>`
+    q<
+      (SummaryRow &
+        CashJoin & {
+          settled_method: SettledMethod;
+          settled_via: SettledVia;
+          settled_at: Date;
+          settled_cents: number;
+          settled_by_name: string | null;
+        })[]
+    >`
       select s.id, s.opened_at, s.closed_at, s.billed_minutes, s.total_cents, s.settled_method, s.settled_via,
-             s.settled_at, sb.name as settled_by_name, ${tableNamesSql}
+             s.settled_at, s.settled_cents, sb.name as settled_by_name, ${cashColumnsSql(q)}, ${tableNamesSql}
       from public.sessions s left join public.staff sb on sb.id = s.settled_by
+      ${cashJoinSql(q)}
       where s.status = 'paid' and s.settled_at >= ${from} and s.settled_at < ${to}
       order by s.settled_at`,
     q<SummaryRow[]>`
@@ -373,7 +417,15 @@ export async function getSummary(dateParam: string | null): Promise<SummaryDTO> 
       from public.sessions s left join public.staff vb on vb.id = s.voided_by
       where s.status = 'void' and s.voided_at >= ${from} and s.voided_at < ${to}
       order by s.voided_at`,
-    getAudit({ from, to, actions: ["payment.conflict", "session.reverse_paid", "checkout.cancel_failed"], limit: 200 }),
+    getAudit({ from, to, actions: [
+        "payment.conflict",
+        "session.reverse_paid",
+        "checkout.cancel_failed",
+        "square.cash_failed",
+        // Cash handed to Square POS that nobody could confirm: Square may hold the sale twice.
+        "cash.handoff_unconfirmed",
+        "cash.handoff_check_skipped",
+      ], limit: 200 }),
   ]);
 
   const row = (r: SummaryRow): SummarySessionRow => ({
@@ -389,6 +441,11 @@ export async function getSummary(dateParam: string | null): Promise<SummaryDTO> 
   const soldCents = closed[0]?.items_cents ?? 0;
   const card = paid.filter((p) => p.settled_method === "card");
   const cash = paid.filter((p) => p.settled_method === "cash");
+  // What was collected, not what was billed: cash is rounded to 5c, and a card can have been
+  // charged a different amount from the final bill (flagged separately as a payment conflict).
+  const collected = (list: { settled_cents: number }[]) => list.reduce((a, r) => a + r.settled_cents, 0);
+  // Cash bills whose sale Square doesn't hold yet. A reversed-and-repaid bill counts by its latest record.
+  const notInSquare = cash.filter((p) => p.cash_state === "pending" || p.cash_state === "failed");
   return {
     businessDate: formatYMD(date),
     from: from.toISOString(),
@@ -401,13 +458,24 @@ export async function getSummary(dateParam: string | null): Promise<SummaryDTO> 
       itemsCents: soldCents,
     },
     itemsSold: itemsSold.map((i) => ({ productId: i.product_id, name: i.name, quantity: i.quantity, cents: i.cents })),
-    paid: { card: { count: card.length, cents: sum(card) }, cash: { count: cash.length, cents: sum(cash) } },
+    paid: {
+      card: { count: card.length, cents: collected(card) },
+      cash: { count: cash.length, cents: collected(cash), roundingCents: collected(cash) - sum(cash) },
+    },
+    squareCashOutstanding: {
+      count: notInSquare.length,
+      cents: notInSquare.reduce((a, p) => a + (p.cash_amount_cents ?? 0), 0),
+      failed: notInSquare.filter((p) => p.cash_state === "failed").length,
+    },
     paidItems: paid.map((p) => ({
       ...row(p),
       method: p.settled_method,
       via: p.settled_via,
       settledAt: p.settled_at.toISOString(),
       settledByName: p.settled_by_name,
+      settledCents: p.settled_cents,
+      // Only a bill paid in cash has a sale of its own in Square to report on.
+      squareCash: p.settled_method === "cash" ? squareCashDTO(p) : null,
     })),
     unpaid: { count: unpaid.length, cents: sum(unpaid), items: unpaid.map(row) },
     outstandingOlder: { count: older[0]?.count ?? 0, cents: older[0]?.cents ?? 0 },

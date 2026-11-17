@@ -28,6 +28,15 @@ export function itemsCents(items: readonly BillItem[]): number {
   return items.reduce((sum, i) => sum + itemCents(i), 0);
 }
 
+/**
+ * What to collect when a bill is paid in cash: the total rounded to the nearest 5c (1–2c down,
+ * 3–4c up), as Australian cash is. Square refuses cash amounts that aren't a multiple of 5c.
+ * Card payments are never rounded.
+ */
+export function cashDueCents(totalCents: number): number {
+  return Math.round(totalCents / 5) * 5;
+}
+
 export function billTotals(tableCents: number, items: readonly BillItem[]): BillTotals {
   const all = itemsCents(items);
   const taxedItems = itemsCents(items.filter((i) => i.taxed));

@@ -1,3 +1,4 @@
+import { after } from "next/server";
 import { z } from "zod";
 import { requireActor, verifyManagerPin } from "@/lib/server/auth";
 import { notFound } from "@/lib/server/errors";
@@ -8,7 +9,6 @@ import {
   cancelCheckout,
   chargeCard,
   editTimes,
-  markPaid,
   pauseSession,
   releaseTable,
   removeItem,
@@ -20,6 +20,8 @@ import {
   transferSession,
   voidSession,
 } from "@/lib/server/sessions";
+import { checkCashHandoff, markPaidCheckingPos, startCashHandoff } from "@/lib/server/pos-cash";
+import { pushCashInBackground } from "@/lib/server/square-cash";
 
 // A resend can make three Square calls in a row under the bill's lock (cancel, order, checkout).
 // Each has its own timeout; 60 s leaves room for all three to run slow and still answer.
@@ -71,8 +73,16 @@ export const POST = handler(async (req: Request, ctx: RouteContext<"/api/session
       return ok(OK);
     case "mark-paid": {
       const b = await readJson(req, markPaidBody);
-      return ok(await markPaid(actor, id, b.method, { cardConfirmed: b.cardConfirmed }));
+      // If this bill was just handed to Square POS, this first asks Square whether POS took the cash.
+      const out = await markPaidCheckingPos(actor, id, b.method, { cardConfirmed: b.cardConfirmed });
+      // A cash sale is put into Square after the response, so the tap comes straight back.
+      if (b.method === "cash") after(pushCashInBackground);
+      return ok(out);
     }
+    case "cash-handoff":
+      return ok(await startCashHandoff(actor, id));
+    case "cash-handoff-check":
+      return ok(await checkCashHandoff(actor, id));
     case "add-item": {
       const b = await readJson(req, addItemBody);
       await addItem(actor, id, b.productId, b.quantity);
@@ -92,6 +102,8 @@ export const POST = handler(async (req: Request, ctx: RouteContext<"/api/session
       const b = await readJson(req, managerAction);
       const manager = await verifyManagerPin(actor, b.managerPin);
       await reversePaid(actor, manager, id, b.reason);
+      // If the bill was paid in cash, its sale in Square is refunded in the background.
+      after(pushCashInBackground);
       return ok(OK);
     }
     case "edit-times": {

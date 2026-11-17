@@ -18,16 +18,22 @@ interface Props {
   session: SessionDTO;
   /** Reloads the open sheet's detail. The floor is refetched here as well. */
   reload: () => Promise<void>;
+  /** The sheet is mid-action (e.g. sending a charge): don't let items be added meanwhile. */
+  busy?: boolean;
 }
 
+/** After an add timed out the server may still be finishing it; hold the add buttons this long. */
+const TIMEOUT_HOLD_MS = 5000;
+
 /** Add and remove snacks/drinks on a bill. Shared by the session detail sheet and the charge sheet. */
-export function ItemsPanel({ session, reload }: Props) {
+export function ItemsPanel({ session, reload, busy = false }: Props) {
   const router = useRouter();
   const toast = useToast();
   const { floor, offline, refetch } = useFloor();
   const { run, pending: removing } = useAction();
   const [adding, setAdding] = useState<ReadonlySet<string>>(new Set());
   const inflight = useRef(new Set<string>());
+  const [cooling, setCooling] = useState(false);
   const [toRemove, setToRemove] = useState<SessionItemDTO | null>(null);
 
   const products = floor?.products ?? [];
@@ -52,6 +58,10 @@ export function ItemsPanel({ session, reload }: Props) {
         router.replace(dest);
       } else {
         toast.show(errorMessage(e), "error");
+        if (e instanceof ApiError && e.status === 0) {
+          setCooling(true);
+          setTimeout(() => setCooling(false), TIMEOUT_HOLD_MS);
+        }
         // The bill may have moved under us (another iPad, or a card request started): resync.
         if (e instanceof ApiError && e.status === 409) await Promise.all([reload(), refetch()]);
       }
@@ -91,7 +101,7 @@ export function ItemsPanel({ session, reload }: Props) {
                 <li key={p.id} className="flex">
                   <button
                     type="button"
-                    disabled={!!blocked || adding.has(p.id)}
+                    disabled={!!blocked || busy || cooling || adding.has(p.id)}
                     aria-busy={adding.has(p.id)}
                     aria-label={`Add ${p.name}, ${formatCents(p.priceCents)}${p.taxed ? "" : ", GST-free"}`}
                     onClick={() => void add(p.id)}
@@ -127,7 +137,7 @@ export function ItemsPanel({ session, reload }: Props) {
                 <span className="tabular-nums">{formatCents(itemCents(i))}</span>
                 {editable ? (
                   <Button
-                    disabled={!!blocked || removing}
+                    disabled={!!blocked || busy || removing}
                     aria-label={`Remove ${i.name}, ${formatCents(itemCents(i))}`}
                     onClick={() => setToRemove(i)}
                   >

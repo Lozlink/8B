@@ -6,11 +6,15 @@ import { Button, Notice } from "@/components/ui";
 import { useAction } from "@/lib/client/use-action";
 import { api } from "@/lib/client/api";
 import { isManagerRequired } from "@/lib/client/errors";
+import { useFloor } from "@/lib/client/floor-context";
+import { useStandDevice } from "@/lib/client/stand";
 import type { PairingCodeDTO } from "@/lib/domain/types";
 import { TabHeader, type TabProps } from "./shared";
 
 export function TerminalTab({ state, reload, onError }: TabProps) {
   const { run, pending } = useAction();
+  const { floor } = useFloor();
+  const [onStand, setOnStand] = useStandDevice();
   const [pairing, setPairing] = useState<PairingCodeDTO | null>(null);
   const [unpairing, setUnpairing] = useState(false);
   const deviceId = state.settings.terminalDeviceId;
@@ -99,6 +103,33 @@ export function TerminalTab({ state, reload, onError }: TabProps) {
           ) : null}
         </div>
       )}
+
+      {floor?.posCashAvailable ? (
+        <div className="flex items-start justify-between gap-4 rounded-2xl border border-line bg-surface p-4">
+          <div className="min-w-0">
+            <p id="stand-label" className="text-lg font-semibold">
+              This iPad is on the Square Stand
+            </p>
+            <p className="mt-1 text-base text-muted">
+              {onStand
+                ? "On: cash opens Square POS with the amount filled in, and the drawer opens there."
+                : "Off: Mark paid – cash only records the sale. Turn this on for the iPad that sits on the Stand. It only affects this iPad."}
+            </p>
+          </div>
+          <button
+            type="button"
+            role="switch"
+            aria-checked={onStand}
+            aria-labelledby="stand-label"
+            onClick={() => setOnStand(!onStand)}
+            className={`flex h-12 w-20 shrink-0 items-center rounded-full border px-1 transition-colors ${
+              onStand ? "justify-end border-[#2f9265] bg-felt" : "justify-start border-line bg-surface-2"
+            }`}
+          >
+            <span aria-hidden className="size-9 rounded-full bg-white shadow" />
+          </button>
+        </div>
+      ) : null}
 
       {unpairing ? (
         <ActionDialog

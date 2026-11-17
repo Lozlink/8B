@@ -60,6 +60,59 @@ describe("R7: the background checkout sync can't start a refetch loop", () => {
   });
 });
 
+describe("checkout broadcasts: only when something the floor shows has changed", () => {
+  const stale = () =>
+    h.raw(null, `update public.terminal_checkouts set created_at = now() - interval '1 minute', last_synced_at = null`);
+
+  it("a sync that finds no change claims the checkout, asks Square, and broadcasts nothing", async () => {
+    const id = await awaitingPayment(h);
+    await chargeCard(h.staff.actor, id);
+    await stale(); // done as superuser, outside the count below
+    const before = await broadcasts();
+
+    await syncStaleCheckouts(); // Square: still PENDING
+    expect(h.gateway.gets).toEqual(["chk_1"]);
+    expect(await broadcasts()).toBe(before);
+
+    // The claim still stamped last_synced_at, so the 15 s throttle holds.
+    const [c] = await h.sql<{ last_synced_at: Date | null; status: string }[]>`
+      select last_synced_at, status from public.terminal_checkouts`;
+    expect(c.status).toBe("PENDING");
+    expect(c.last_synced_at).not.toBeNull();
+    await syncStaleCheckouts();
+    expect(h.gateway.gets).toEqual(["chk_1"]);
+    expect(await broadcasts()).toBe(before);
+  });
+
+  it("a status change broadcasts once", async () => {
+    const id = await awaitingPayment(h);
+    await chargeCard(h.staff.actor, id);
+    await stale();
+    h.gateway.getFor.set("chk_1", "IN_PROGRESS");
+    const before = await broadcasts();
+    await syncStaleCheckouts();
+    expect(await broadcasts()).toBe(before + 1);
+    const [c] = await h.sql<{ status: string }[]>`select status from public.terminal_checkouts`;
+    expect(c.status).toBe("IN_PROGRESS");
+  });
+
+  it("creating a checkout broadcasts", async () => {
+    const id = await awaitingPayment(h);
+    const before = await broadcasts();
+    await chargeCard(h.staff.actor, id);
+    expect(await broadcasts()).toBeGreaterThan(before);
+  });
+
+  it("a claim that matches no rows broadcasts nothing", async () => {
+    const id = await awaitingPayment(h);
+    await chargeCard(h.staff.actor, id);
+    const before = await broadcasts();
+    await h.sql`update public.terminal_checkouts set last_synced_at = now() where false`;
+    await h.sql`update public.terminal_checkouts set last_synced_at = now() where id = 'chk_1'`; // a stamp alone
+    expect(await broadcasts()).toBe(before);
+  });
+});
+
 describe("R8: pool settings for Supabase's transaction pooler", () => {
   it("never pipelines queries and bounds how long a query can wait", async () => {
     setDbForTests(undefined); // build the production pool (lazy: nothing connects)

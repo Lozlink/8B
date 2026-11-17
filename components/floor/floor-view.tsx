@@ -7,7 +7,7 @@ import { Button, Sheet, Spinner } from "@/components/ui";
 import { useToast } from "@/components/toast";
 import { api } from "@/lib/client/api";
 import { useFloor, useServerNow } from "@/lib/client/floor-context";
-import { useAction } from "@/lib/client/use-action";
+import { useKeyedAction } from "@/lib/client/use-action";
 import type { SessionDTO, TableDTO } from "@/lib/domain/types";
 import { formatClock } from "@/lib/format";
 import { estimate } from "@/lib/client/session-view";
@@ -24,7 +24,7 @@ export function FloorView() {
   const { floor } = useFloor();
   const nowMs = useServerNow();
   const toast = useToast();
-  const { run, pending } = useAction();
+  const { run, inFlight, busy } = useKeyedAction();
   const [overlay, setOverlay] = useState<Overlay>(null);
 
   const bySession = useMemo(() => {
@@ -36,9 +36,9 @@ export function FloorView() {
 
   const actions: CardActions = useMemo(
     () => ({
-      start: (t) => void run(() => api.start(t.id)),
-      pause: (s) => void run(() => api.pause(s.id)),
-      resume: (s) => void run(() => api.resume(s.id)),
+      start: (t) => void run(t.id, () => api.start(t.id)),
+      pause: (s) => void run(keyOf(s), () => api.pause(s.id)),
+      resume: (s) => void run(keyOf(s), () => api.resume(s.id)),
       transfer: (s) => setOverlay({ kind: "transfer", session: s }),
       stop: (s) => setOverlay({ kind: "stop", session: s }),
       charge: (s) => setOverlay({ kind: "charge", sessionId: s.id }),
@@ -57,7 +57,7 @@ export function FloorView() {
   const freeTables = tables.filter((t) => t.active && !bySession.has(t.id));
 
   const doStop = async (s: SessionDTO) => {
-    const result = await run(() => api.stop(s.id));
+    const result = await run(keyOf(s), () => api.stop(s.id));
     if (!result) return;
     if (result.status === "void") {
       toast.show("No charge", "success");
@@ -68,7 +68,7 @@ export function FloorView() {
   };
 
   const doTransfer = async (s: SessionDTO, table: TableDTO) => {
-    const ok = await run(() => api.transfer(s.id, table.id));
+    const ok = await run(keyOf(s), () => api.transfer(s.id, table.id));
     if (ok) {
       toast.show(`Moved to ${table.name}`, "success");
       setOverlay(null);
@@ -88,7 +88,7 @@ export function FloorView() {
                 session={bySession.get(t.id) ?? null}
                 pricing={floor.pricing}
                 nowMs={nowMs}
-                busy={pending}
+                busy={busy(t.id)}
                 actions={actions}
               />
             </li>
@@ -107,7 +107,7 @@ export function FloorView() {
       {overlay?.kind === "charge" ? <ChargeSheet sessionId={overlay.sessionId} onClose={() => setOverlay(null)} /> : null}
 
       {overlay?.kind === "transfer" ? (
-        <Sheet title={`Transfer from ${tableName(floor.tables, overlay.session.currentTableId)}`} onClose={() => setOverlay(null)} locked={pending}>
+        <Sheet title={`Transfer from ${tableName(floor.tables, overlay.session.currentTableId)}`} onClose={() => setOverlay(null)} locked={inFlight(keyOf(overlay.session))}>
           {freeTables.length === 0 ? (
             <p className="py-6 text-center text-lg text-muted">No free tables to move to.</p>
           ) : (
@@ -116,7 +116,7 @@ export function FloorView() {
               <ul className="grid grid-cols-2 gap-3">
                 {freeTables.map((t) => (
                   <li key={t.id}>
-                    <Button size="lg" full disabled={pending} onClick={() => void doTransfer(overlay.session, t)}>
+                    <Button size="lg" full disabled={busy(keyOf(overlay.session))} onClick={() => void doTransfer(overlay.session, t)}>
                       {t.name}
                     </Button>
                   </li>
@@ -131,13 +131,18 @@ export function FloorView() {
         <StopConfirm
           session={overlay.session}
           tableLabel={tableName(floor.tables, overlay.session.currentTableId)}
-          pending={pending}
+          pending={inFlight(keyOf(overlay.session))}
           onCancel={() => setOverlay(null)}
           onConfirm={() => void doStop(overlay.session)}
         />
       ) : null}
     </>
   );
+}
+
+/** Busy key for a session's actions: its table (so the card disables), else the session. */
+function keyOf(s: SessionDTO): string {
+  return s.currentTableId ?? s.id;
 }
 
 function tableName(tables: TableDTO[], id: string | null): string {

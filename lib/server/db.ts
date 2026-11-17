@@ -56,6 +56,7 @@ export const PG = {
   CHECK: "23514",
   FOREIGN_KEY: "23503",
   INSUFFICIENT_PRIVILEGE: "42501",
+  LOCK_NOT_AVAILABLE: "55P03",
 } as const;
 
 export function pgCode(e: unknown): string | undefined {

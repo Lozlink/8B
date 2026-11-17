@@ -1,6 +1,7 @@
 import "server-only";
 import { parseLocalTime, type PricingRateCard, type PricingSettings, type RateSnapshot } from "@/lib/pricing";
-import type { Db } from "./db";
+import { PG, pgCode, type Db } from "./db";
+import { AppError } from "./errors";
 import type { CheckoutStatus, SessionStatus } from "@/lib/domain/machine";
 import type { SettledMethod, SettledVia } from "@/lib/domain/types";
 
@@ -86,7 +87,11 @@ export async function getRateCards(q: Db, opts: { activeOnly: boolean }): Promis
 }
 
 export async function getPricingConfig(q: Db): Promise<{ settings: Settings; rateCards: PricingRateCard[] }> {
-  const [settings, rateCards] = await Promise.all([getSettings(q), getRateCards(q, { activeOnly: true })]);
+  // One after the other on purpose. This is called inside Stop's transaction, and postgres.js sends
+  // two queries started together on a transaction's connection back to back (`max_pipeline` only
+  // governs the shared pool). Supavisor doesn't answer pipelined queries in transaction mode.
+  const settings = await getSettings(q);
+  const rateCards = await getRateCards(q, { activeOnly: true });
   return { settings, rateCards };
 }
 
@@ -112,6 +117,8 @@ export interface SessionRow {
   settled_via: SettledVia | null;
   settled_by: string | null;
   settled_at: Date | null;
+  /** What was collected, set exactly while the bill is paid. Cash is rounded to 5c. */
+  settled_cents: number | null;
   square_checkout_id: string | null;
   checkout_attempt: number;
   voided_at: Date | null;
@@ -173,11 +180,32 @@ export interface CatalogStateRow {
   last_error: string | null;
 }
 
-/** Locks and returns a session row for the rest of the transaction. */
+export const BILL_BUSY_MESSAGE = "Someone else is working on this bill. Give it a few seconds and try again.";
+
+/**
+ * Locks and returns a session row for the rest of the transaction. Must be called inside one.
+ *
+ * Another request can hold this lock for as long as its Square calls take, so the wait is capped
+ * at 4 s (`set local`: it lasts until this transaction ends and applies to every later lock wait in it).
+ * Running out of time is a 409 staff can act on, not a crash. The webhook route turns any error
+ * into a 5xx, so Square still retries an event that lost the race.
+ */
 export async function lockSession(q: Db, id: string): Promise<SessionRow | null> {
-  const [row] = await q<SessionRow[]>`select * from public.sessions where id = ${id} for update`;
-  return row ?? null;
+  await q`set local lock_timeout = '4s'`;
+  try {
+    const [row] = await q<SessionRow[]>`select * from public.sessions where id = ${id} for update`;
+    return row ?? null;
+  } catch (e) {
+    const code = pgCode(e);
+    // 55P03: Postgres gave up waiting for the lock. QUERY_TIMEOUT: postgres.js gave up on the
+    // statement (the pooler went quiet while we waited).
+    if (code === PG.LOCK_NOT_AVAILABLE || code === "QUERY_TIMEOUT") {
+      throw new AppError(409, "bill_busy", BILL_BUSY_MESSAGE);
+    }
+    throw e;
+  }
 }
+
 
 export async function getIntervals(q: Db, sessionId: string): Promise<IntervalRow[]> {
   return q<IntervalRow[]>`
@@ -228,6 +256,7 @@ export function auditView(s: SessionRow) {
     settled_via: s.settled_via,
     settled_by: s.settled_by,
     settled_at: s.settled_at,
+    settled_cents: s.settled_cents,
     square_checkout_id: s.square_checkout_id,
     void_reason: s.void_reason,
   };

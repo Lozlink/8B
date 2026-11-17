@@ -72,3 +72,38 @@ export async function createOrder(input: CreateOrderInput): Promise<SquareOrderS
     throw toUpstreamError(e, what);
   }
 }
+
+export interface SquareOrderTender {
+  type: string;
+  /** The Payments API id of this tender. */
+  paymentId: string | null;
+  amountCents: number | null;
+}
+
+export interface SquareOrderDetail {
+  id: string;
+  locationId: string;
+  tenders: SquareOrderTender[];
+}
+
+/** Reads an order and how it was paid. Used to find the cash payment behind a Square POS sale. */
+export async function getOrder(orderId: string): Promise<SquareOrderDetail> {
+  const what = "look up the cash sale";
+  try {
+    const res = await square().orders.get({ orderId }, { timeoutInSeconds: 8, maxRetries: 0 });
+    const order = res.order;
+    if (!order?.id) throw upstream(`Square returned an unexpected response while trying to ${what}.`);
+    return {
+      id: order.id,
+      locationId: order.locationId,
+      tenders: (order.tenders ?? []).map((t) => ({
+        type: t.type,
+        // For Payments-era sales the tender id is the payment id; `payment_id` says so explicitly.
+        paymentId: t.paymentId ?? t.id ?? null,
+        amountCents: t.amountMoney?.amount != null ? Number(t.amountMoney.amount) : null,
+      })),
+    };
+  } catch (e) {
+    throw toUpstreamError(e, what, "Try again in a moment.");
+  }
+}

@@ -14,18 +14,28 @@ import {
 import { useRouter } from "next/navigation";
 import { createClient } from "@supabase/supabase-js";
 import type { FloorDTO, MeDTO } from "@/lib/domain/types";
-import { api, ApiError } from "./api";
+import { api } from "./api";
 import { authRedirect } from "./errors";
 import { useLocalTick } from "./ticker";
 import { useLoad } from "./use-load";
+import {
+  connectionState,
+  countsAsFloorFailure,
+  floorFingerprint,
+  pollIntervalMs,
+  timeOffsetSample,
+} from "./floor-logic";
 
 interface FloorContextValue {
   floor: FloorDTO | null;
   me: MeDTO | null;
   /** serverNow - localNow, ms. */
   offsetMs: number;
+  /** True when the screen should be covered: the device is offline or the server has been down a while. */
   offline: boolean;
-  /** Increments on every successful floor fetch (lets other views refresh alongside). */
+  /** True when the server is struggling but not for long enough to cover the screen: show a banner. */
+  degraded: boolean;
+  /** Increments when a floor fetch brings a real change (lets other views refresh alongside). */
   version: number;
   /** awaiting_payment sessions on the floor + bills already off the table. */
   unpaidCount: number;
@@ -60,10 +70,9 @@ function subscribeOnline(cb: () => void): () => void {
   };
 }
 
-const POLL_MS = 20_000;
-const RETRY_MS = 3_000;
 const BROADCAST_MIN_GAP_MS = 1_000;
 const TIME_SYNC_MS = 5 * 60_000;
+const TIME_RETRY_MS = 5_000;
 
 export function FloorProvider({ children }: { children: ReactNode }) {
   const router = useRouter();
@@ -82,6 +91,10 @@ export function FloorProvider({ children }: { children: ReactNode }) {
   const queued = useRef(false);
   const failuresRef = useRef(0);
   const lastAttempt = useRef(0);
+  const fingerprint = useRef<string | null>(null);
+  const realtimeUp = useRef(false);
+  const syncTimeRef = useRef<() => Promise<void>>(async () => {});
+  const timeRetry = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
 
   const refetch = useCallback((): Promise<void> => {
     if (inflight.current) {
@@ -96,13 +109,19 @@ export function FloorProvider({ children }: { children: ReactNode }) {
           const data = await api.floor();
           failuresRef.current = 0;
           setFailures(0);
-          setFloor(data);
-          setVersion((v) => v + 1);
+          // serverTime differs on every fetch; only a real change replaces the floor and bumps
+          // `version`, so open sheets and pages don't reload for nothing.
+          const fp = floorFingerprint(data);
+          if (fp !== fingerprint.current) {
+            fingerprint.current = fp;
+            setFloor(data);
+            setVersion((v) => v + 1);
+          }
         } catch (e) {
           const dest = authRedirect(e);
           if (dest) {
             router.replace(dest);
-          } else if (e instanceof ApiError && (e.status === 0 || e.status >= 500)) {
+          } else if (countsAsFloorFailure(false)) {
             failuresRef.current += 1;
             setFailures(failuresRef.current);
           }
@@ -115,15 +134,22 @@ export function FloorProvider({ children }: { children: ReactNode }) {
   }, [router]);
 
   const syncTime = useCallback(async () => {
+    clearTimeout(timeRetry.current);
     const t0 = Date.now();
+    let offset: number | null = null;
     try {
       const { now } = await api.time();
-      const t1 = Date.now();
-      setOffsetMs(Date.parse(now) - (t0 + t1) / 2);
+      offset = timeOffsetSample(t0, Date.now(), Date.parse(now));
     } catch {
-      // keep the previous offset
+      // fall through to the retry
     }
+    if (offset !== null) setOffsetMs(offset);
+    else timeRetry.current = setTimeout(() => void syncTimeRef.current(), TIME_RETRY_MS); // keep the previous offset meanwhile
   }, []);
+  useEffect(() => {
+    syncTimeRef.current = syncTime;
+    return () => clearTimeout(timeRetry.current);
+  }, [syncTime]);
 
   // Initial load + who am I.
   useLoad(refetch);
@@ -161,7 +187,7 @@ export function FloorProvider({ children }: { children: ReactNode }) {
   // Fallback poll (faster while failing so recovery is quick) + wake-up triggers.
   useEffect(() => {
     const id = setInterval(() => {
-      const wait = failuresRef.current > 0 ? RETRY_MS : POLL_MS;
+      const wait = pollIntervalMs(failuresRef.current, realtimeUp.current);
       if (Date.now() - lastAttempt.current >= wait - 250) void refetch();
     }, 1000);
     const wake = () => {
@@ -191,7 +217,10 @@ export function FloorProvider({ children }: { children: ReactNode }) {
     const key = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
     // Misconfigured (missing or still-encrypted) values must not take the floor down: skip Realtime
     // and rely on polling instead.
-    if (!url || !key || !/^https?:\/\//.test(url)) return;
+    if (!url || !key || !/^https?:\/\//.test(url)) {
+      console.warn("[realtime] skipped: Supabase URL/key missing or not decrypted. Falling back to polling every 5 s.");
+      return;
+    }
     let sb: ReturnType<typeof createClient>;
     try {
       sb = createClient(url, key, { auth: { persistSession: false, autoRefreshToken: false } });
@@ -211,10 +240,18 @@ export function FloorProvider({ children }: { children: ReactNode }) {
         debounce = setTimeout(() => void refetch(), Math.max(150, BROADCAST_MIN_GAP_MS - sinceLast));
       })
       .subscribe((status) => {
+        // While not subscribed the poll runs every 5 s instead of 20 s. The client reconnects by
+        // itself; we only watch the status and never rebuild the channel.
+        const up = status === "SUBSCRIBED";
+        if (up !== realtimeUp.current) {
+          if (!up) console.warn("[realtime] not connected:", status);
+          realtimeUp.current = up;
+        }
         // Catch up on anything missed while (re)connecting.
-        if (status === "SUBSCRIBED") void refetch();
+        if (up) void refetch();
       });
     return () => {
+      realtimeUp.current = false;
       clearTimeout(debounce);
       void sb.removeChannel(channel);
     };
@@ -225,11 +262,13 @@ export function FloorProvider({ children }: { children: ReactNode }) {
     return floor.sessions.filter((s) => s.status === "awaiting_payment").length + floor.unpaidOffTableCount;
   }, [floor]);
 
-  const offline = !online || failures >= 2;
+  const conn = connectionState(online, failures);
+  const offline = conn === "offline";
+  const degraded = conn === "degraded";
 
   const value = useMemo<FloorContextValue>(
-    () => ({ floor, me, offsetMs, offline, version, unpaidCount, refetch }),
-    [floor, me, offsetMs, offline, version, unpaidCount, refetch],
+    () => ({ floor, me, offsetMs, offline, degraded, version, unpaidCount, refetch }),
+    [floor, me, offsetMs, offline, degraded, version, unpaidCount, refetch],
   );
 
   return <FloorContext.Provider value={value}>{children}</FloorContext.Provider>;

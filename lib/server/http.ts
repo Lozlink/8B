@@ -40,6 +40,14 @@ export function errorResponse(e: unknown): NextResponse<ApiErrorBody> {
     return NextResponse.json({ error: { code: `pricing_${e.code.toLowerCase()}`, message: e.message, detail: e.detail } }, { status: 409 });
   }
   const code = pgCode(e);
+  if (code === PG.LOCK_NOT_AVAILABLE) {
+    // A lock wait ran out (see lockSession: every bill action caps its lock waits). The bill's own
+    // lock is reported by lockSession; this is any other row the same transaction waited on.
+    return NextResponse.json(
+      { error: { code: "busy", message: "Someone else is changing this right now. Give it a few seconds and try again." } },
+      { status: 409 },
+    );
+  }
   if (code === PG.UNIQUE || code === PG.EXCLUSION || code === PG.CHECK) {
     const constraint = pgConstraint(e);
     const message = (constraint && CONSTRAINT_MESSAGES[constraint]) ?? "That change conflicts with the current state. Refresh and try again.";

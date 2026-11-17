@@ -62,7 +62,7 @@ describe("section 10 acceptance", () => {
     const sum = await getSummary(null);
     expect(sum.businessDate).toBe("2026-11-20");
     expect(sum.paid.card).toEqual({ count: 1, cents: 3542 });
-    expect(sum.paid.cash).toEqual({ count: 0, cents: 0 });
+    expect(sum.paid.cash).toEqual({ count: 0, cents: 0, roundingCents: 0 });
     expect(sum.sessions).toEqual({ count: 1, billedMinutes: 85, billedCents: 3542, tableCents: 3542, itemsCents: 0 });
     expect(sum.unpaid.count).toBe(0);
     expect(sum.paidItems[0]).toMatchObject({ id, method: "card", via: "square_webhook", tableNames: "Table 2 → Table 5", totalCents: 3542 });
@@ -97,10 +97,11 @@ describe("section 10 acceptance", () => {
 
     freeze(at(105));
     const sum = await getSummary(null);
-    expect(sum.paid.cash).toEqual({ count: 1, cents: 3542 });
+    // The bill is $35.42; cash is collected to the nearest 5c.
+    expect(sum.paid.cash).toEqual({ count: 1, cents: 3540, roundingCents: -2 });
     expect(sum.paid.card).toEqual({ count: 0, cents: 0 });
     expect(sum.paidItems).toHaveLength(1);
-    expect(sum.paidItems[0]).toMatchObject({ method: "cash", via: "staff", settledByName: "Sam Staff" });
+    expect(sum.paidItems[0]).toMatchObject({ method: "cash", via: "staff", settledByName: "Sam Staff", totalCents: 3542, settledCents: 3540 });
     expect(await auditActions(h, id)).toEqual([
       "session.start", "session.pause", "session.resume", "session.transfer", "session.stop", "session.mark_paid",
     ]);

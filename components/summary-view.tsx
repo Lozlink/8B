@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { useRouter } from "next/navigation";
 import { ActionDialog } from "@/components/action-dialog";
 import { SessionDetailSheet } from "@/components/session-detail-sheet";
@@ -45,6 +45,15 @@ export function SummaryView() {
   }, [date, router]);
 
   useLoad(load, version);
+
+  // Square's state for a cash sale changes without changing the floor, so look again every so often
+  // while any are still on their way.
+  const outstanding = data?.squareCashOutstanding.count ?? 0;
+  useEffect(() => {
+    if (outstanding === 0) return;
+    const id = setInterval(() => void load(), 30_000);
+    return () => clearInterval(id);
+  }, [outstanding, load]);
 
   const dur = (m: number) => `${Math.floor(m / 60)}h ${m % 60}m`;
 
@@ -96,7 +105,12 @@ export function SummaryView() {
               }
             />
             <Stat title="Paid by card" big={formatCents(data.paid.card.cents)} sub={`${data.paid.card.count} payment${data.paid.card.count === 1 ? "" : "s"}`} />
-            <Stat title="Paid by cash" big={formatCents(data.paid.cash.cents)} sub={`${data.paid.cash.count} payment${data.paid.cash.count === 1 ? "" : "s"}`} />
+            <Stat title="Paid by cash" big={formatCents(data.paid.cash.cents)} sub={`${data.paid.cash.count} payment${data.paid.cash.count === 1 ? "" : "s"}${
+                data.paid.cash.roundingCents !== 0
+                  ? ` · ${data.paid.cash.roundingCents > 0 ? "+" : "−"}${formatCents(Math.abs(data.paid.cash.roundingCents))} rounding`
+                  : ""
+              }`}
+            />
             <Stat
               title="Unpaid"
               big={formatCents(data.unpaid.cents)}
@@ -110,6 +124,20 @@ export function SummaryView() {
               warn={data.outstandingOlder.count > 0}
             />
           </div>
+
+          {data.squareCashOutstanding.count > 0 ? (
+            <Notice tone="warn">
+              <p className="font-semibold">
+                {data.squareCashOutstanding.count} cash payment{data.squareCashOutstanding.count === 1 ? "" : "s"} (
+                <span className="tabular-nums">{formatCents(data.squareCashOutstanding.cents)}</span>) not in Square yet.
+              </p>
+              <p>
+                {data.squareCashOutstanding.failed > 0
+                  ? `${data.squareCashOutstanding.failed} didn’t go through. A manager needs to retry in Admin → Items.`
+                  : "They are still being sent."}
+              </p>
+            </Notice>
+          ) : null}
 
           {data.attention.length > 0 ? (
             <section aria-label="Needs attention" className="flex flex-col gap-2">
@@ -201,8 +229,13 @@ export function SummaryView() {
                           {formatTime(p.settledAt, tz)} · {p.method}
                           {p.settledByName ? ` · ${p.settledByName}` : ""}
                         </span>
+                        {p.method === "cash" && p.squareCash?.state === "failed" ? (
+                          <span className="text-sm font-semibold text-warn">Not in Square</span>
+                        ) : p.method === "cash" && p.squareCash?.state === "pending" ? (
+                          <span className="text-sm text-warn">Sending to Square</span>
+                        ) : null}
                       </span>
-                      <span className="text-lg font-semibold tabular-nums">{p.totalCents !== null ? formatCents(p.totalCents) : "—"}</span>
+                      <span className="text-lg font-semibold tabular-nums">{formatCents(p.settledCents)}</span>
                     </button>
                     <Button variant="secondary" onClick={() => setReversing(p)}>
                       Reverse
@@ -220,7 +253,7 @@ export function SummaryView() {
       {reversing ? (
         <ActionDialog
           title={`Reverse ${reversing.tableNames}`}
-          description="Puts the session back to awaiting payment. Refund any money through Square yourself. Needs a manager PIN."
+          description={reversing.method === "cash" ? "The bill goes back to unpaid. The app takes the cash sale back out of Square. Hand the cash back yourself. Needs a manager PIN." : "Puts the session back to awaiting payment. Refund any money through Square yourself. Needs a manager PIN."}
           requirePin
           danger
           submitLabel="Reverse payment"

@@ -15,6 +15,9 @@ import type { StaffRole } from "@/lib/domain/types";
  *    held by the owner). It gets a signed, httpOnly device cookie. PIN login only works on enrolled
  *    devices, so a 4-digit PIN can't be brute-forced from the open internet. Managers can revoke.
  * 2. Staff session: tap your name, enter your PIN → signed session cookie bound to the device.
+ *    It lasts 20 hours from login and is never renewed: long enough that it doesn't run out in the
+ *    middle of a long day's trade, short enough that each day starts with someone's own PIN, so
+ *    actions aren't attributed to whoever logged in days ago.
  * 3. Manager step-up: sensitive actions carry a manager PIN in the request (or, for the admin
  *    screens, a 10-minute elevation cookie obtained with a manager PIN).
  * All PIN attempts are recorded and throttled.
@@ -24,7 +27,7 @@ const DEVICE_COOKIE = "tt_device";
 const SESSION_COOKIE = "tt_session";
 const ELEVATION_COOKIE = "tt_mgr";
 
-const SESSION_TTL_S = 14 * 60 * 60; // a long shift
+const SESSION_TTL_S = 20 * 60 * 60; // fixed from login; covers the longest trading day
 const ELEVATION_TTL_S = 10 * 60;
 const DEVICE_TTL_S = 400 * 24 * 60 * 60; // browsers cap cookie lifetime at 400 days
 
@@ -50,6 +53,16 @@ export interface Manager {
 
 function key(): Uint8Array {
   return new TextEncoder().encode(env().SESSION_SECRET);
+}
+
+/** Signs a short-lived token with the session secret. The audience keeps one kind of token from passing as another. */
+export async function signToken(payload: JWTPayload, ttlSeconds: number, audience: string): Promise<string> {
+  return sign(payload, ttlSeconds, audience);
+}
+
+/** The payload of a token made by `signToken` for this audience, or null if it is forged, expired or for something else. */
+export async function verifyToken(token: string | undefined, audience: string): Promise<JWTPayload | null> {
+  return verify(token, audience);
 }
 
 async function sign(payload: JWTPayload, ttlSeconds: number, audience: string): Promise<string> {
@@ -229,12 +242,18 @@ export async function login(staffId: string, pin: string): Promise<Actor> {
   if (outcome.kind !== "ok") throw new AppError(401, "invalid_credentials", "Wrong PIN.");
   const s = outcome.staff;
 
-  const token = await sign({ sub: s.id, dev: device.id }, SESSION_TTL_S, "staff");
   const jar = await cookies();
-  jar.set(SESSION_COOKIE, token, { ...cookieBase, maxAge: SESSION_TTL_S });
+  await issueSession(jar, s.id, device.id);
   jar.delete(ELEVATION_COOKIE);
   await db()`update public.devices set last_seen_at = now() where id = ${device.id}`;
   return { staffId: s.id, name: s.name, role: s.role, deviceId: device.id, deviceLabel: device.label };
+}
+
+type CookieJar = Awaited<ReturnType<typeof cookies>>;
+
+async function issueSession(jar: CookieJar, staffId: string, deviceId: string): Promise<void> {
+  const token = await sign({ sub: staffId, dev: deviceId }, SESSION_TTL_S, "staff");
+  jar.set(SESSION_COOKIE, token, { ...cookieBase, maxAge: SESSION_TTL_S });
 }
 
 export async function logout(): Promise<void> {

@@ -1,7 +1,7 @@
 import "server-only";
 import * as catalog from "@/lib/square/catalog";
 import { db, withTx } from "./db";
-import { squareEnv, squareEnvironmentOrNull } from "./env";
+import { squareEnv, squareLooksConfigured } from "./env";
 import { AppError } from "./errors";
 import type { ProductRow } from "./repo";
 
@@ -93,11 +93,6 @@ export async function syncProducts(): Promise<number> {
     }
     throw e;
   }
-}
-
-/** Peek without validating or logging: is there any point asking Square? */
-function squareLooksConfigured(): boolean {
-  return squareEnvironmentOrNull() !== null && !!process.env.SQUARE_ACCESS_TOKEN && !!process.env.SQUARE_LOCATION_ID;
 }
 
 /**

@@ -61,6 +61,23 @@ export interface SessionItemDTO {
   removedByName: string | null;
 }
 
+/**
+ * A cash payment's record in Square.
+ *   pending  — still being sent (retried in the background)
+ *   recorded — the sale is in Square
+ *   refunded — the payment was reversed here and the sale and its refund are both in Square
+ *   skipped  — reversed before anything reached Square
+ *   failed   — Square refused it or it kept failing; a manager can retry in Admin → Items
+ */
+export type SquareCashState = "pending" | "recorded" | "refunded" | "skipped" | "failed";
+
+export interface SquareCashDTO {
+  state: SquareCashState;
+  amountCents: number;
+  /** Why the last try failed, if it did. Staff-readable. */
+  error: string | null;
+}
+
 export interface SessionDTO {
   id: string;
   status: SessionStatus;
@@ -79,6 +96,13 @@ export interface SessionDTO {
   settledVia: SettledVia | null;
   settledAt: string | null;
   settledByName: string | null;
+  /**
+   * What was actually collected, once paid. Cash is the bill rounded to the nearest 5c
+   * (`cashDueCents` in lib/domain/bill.ts); a card is the amount the card was charged.
+   */
+  settledCents: number | null;
+  /** Where the latest cash payment for this bill stands in Square. Null if it was never paid in cash. */
+  squareCash: SquareCashDTO | null;
   voidReason: string | null;
   note: string | null;
   intervals: IntervalDTO[];
@@ -100,6 +124,12 @@ export interface FloorDTO {
   unpaidOffTableCount: number;
   pricing: PricingConfigDTO;
   terminalPaired: boolean;
+  /**
+   * true when the server can hand a cash sale to the Square POS app (SQUARE_APPLICATION_ID is set).
+   * Whether THIS iPad offers it is a per-device switch kept in the browser (the iPad on the Square
+   * Stand, where the cash drawer is).
+   */
+  posCashAvailable: boolean;
   /** Items staff can put on a bill (active products, in display order). Empty if none are synced. */
   products: ProductDTO[];
 }
@@ -139,9 +169,22 @@ export interface SummaryDTO {
   sessions: { count: number; billedMinutes: number; billedCents: number; tableCents: number; itemsCents: number };
   /** Items on the bills counted in `sessions` (closed in the window, not void), biggest first. */
   itemsSold: { productId: string; name: string; quantity: number; cents: number }[];
-  paid: { card: { count: number; cents: number }; cash: { count: number; cents: number } };
-  /** Every session settled in the window (for "Reverse paid", manager only). */
-  paidItems: (SummarySessionRow & { method: SettledMethod; via: SettledVia; settledAt: string; settledByName: string | null })[];
+  /**
+   * `cents` is what was collected (settledCents), so cash matches the drawer. `roundingCents` is
+   * cash collected minus the bills it settled (5c rounding; can be negative).
+   */
+  paid: { card: { count: number; cents: number }; cash: { count: number; cents: number; roundingCents: number } };
+  /** Cash payments settled in the window that aren't in Square yet. `failed` of them need a manager. */
+  squareCashOutstanding: { count: number; cents: number; failed: number };
+  /** Every session settled in the window (for "Reverse paid", manager only). `totalCents` is the bill. */
+  paidItems: (SummarySessionRow & {
+    method: SettledMethod;
+    via: SettledVia;
+    settledAt: string;
+    settledByName: string | null;
+    settledCents: number;
+    squareCash: SquareCashDTO | null;
+  })[];
   unpaid: { count: number; cents: number; items: SummarySessionRow[] };
   outstandingOlder: { count: number; cents: number };
   voids: { count: number; items: (SummarySessionRow & { reason: string; voidedByName: string | null })[] };
@@ -158,7 +201,8 @@ export interface SummarySessionRow {
 }
 
 export type MarkPaidOutcome =
-  | { kind: "paid"; method: SettledMethod; via: SettledVia }
+  /** `amountCents` is what was collected (cash: rounded to 5c). */
+  | { kind: "paid"; method: SettledMethod; via: SettledVia; amountCents: number }
   /** A pending card checkout turned out to have completed — it's paid by card; don't take cash. */
   | { kind: "already_paid_by_card" };
 
@@ -224,6 +268,8 @@ export interface AdminCatalogDTO {
 export interface AdminStateDTO {
   manager: { id: string; name: string };
   catalog: AdminCatalogDTO;
+  /** Cash payments (all time) not yet in Square, and the most recent reason one failed. */
+  squareCash: { pending: number; failed: number; lastError: string | null };
   tables: TableDTO[];
   rateCards: AdminRateCardDTO[];
   settings: AdminSettingsDTO;

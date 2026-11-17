@@ -36,10 +36,18 @@ function OfflineOverlay() {
   );
 }
 
+function DegradedBanner() {
+  return (
+    <div role="status" className="border-b border-[#c18a22] bg-[#33260a] px-4 py-2 text-center text-base">
+      Having trouble reaching the server. Trying again. What you see may be a few seconds behind.
+    </div>
+  );
+}
+
 function Chrome({ children }: { children: ReactNode }) {
   const pathname = usePathname();
   const router = useRouter();
-  const { me, unpaidCount, offline } = useFloor();
+  const { me, unpaidCount, offline, degraded } = useFloor();
   const { run, pending } = useAction();
 
   const switchUser = () =>
@@ -96,6 +104,7 @@ function Chrome({ children }: { children: ReactNode }) {
           </Button>
         </div>
       </header>
+      {degraded && !offline ? <DegradedBanner /> : null}
       <main className="flex-1 px-4 py-4 pb-[calc(env(safe-area-inset-bottom)+1rem)]">{children}</main>
       {offline ? <OfflineOverlay /> : null}
     </div>
