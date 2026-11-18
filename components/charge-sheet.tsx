@@ -1,23 +1,34 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { useRouter } from "next/navigation";
 import { ActionDialog } from "@/components/action-dialog";
+import { AdjustmentRows } from "@/components/bill-rows";
+import { DiscountPanel } from "@/components/discount-panel";
 import { ItemsPanel } from "@/components/items-panel";
+import { NextBillButton, PartHeader, PartsPanel, SplitButton } from "@/components/split-panel";
+import { ReceiptButton } from "@/components/receipt-button";
 import { Badge, Button, Notice, Sheet, Spinner } from "@/components/ui";
 import { useToast } from "@/components/toast";
 import { api } from "@/lib/client/api";
 import { useLoad } from "@/lib/client/use-load";
-import { authRedirect, errorMessage } from "@/lib/client/errors";
+import { authRedirect, errorMessage, isBillChanged } from "@/lib/client/errors";
 import { useFloor } from "@/lib/client/floor-context";
 import { useStandDevice } from "@/lib/client/stand";
 import { useAction } from "@/lib/client/use-action";
 import { isCheckoutLive } from "@/lib/domain/machine";
 import type { SessionDetailDTO } from "@/lib/domain/types";
 import { formatCents } from "@/lib/pricing";
-import { billOf, groupItems } from "@/lib/client/bill-view";
+import { billName, billOf, discountBase, groupItems, isEmptyCounterSale, lineLabel } from "@/lib/client/bill-view";
 import { cashDueCents } from "@/lib/domain/bill";
-import { checkoutLabel, sessionTableNames } from "@/lib/client/session-view";
+import { checkoutLabel } from "@/lib/client/session-view";
+import { inSplit, nextUnpaidBill, type NextBill } from "@/lib/client/split-view";
+import { useParentBill } from "@/lib/client/use-parent-bill";
+
+/** Hands the iPad over to another app's link (Square POS). Kept out of the component on purpose. */
+function leaveFor(url: string): void {
+  window.location.assign(url);
+}
 
 const ALREADY_PAID = "Card payment already went through — this bill is paid. Don't take cash.";
 const SYNC_MS = 5000;
@@ -25,9 +36,43 @@ const SYNC_MS = 5000;
 interface Props {
   sessionId: string;
   onClose: () => void;
+  /**
+   * Set only by the sheet that just made a counter sale: closing it with nothing on the bill throws
+   * the bill away. A sheet opened on an empty counter sale from the Unpaid list does not do this
+   * (another iPad may be about to add to it) and offers a Discard button instead.
+   */
+  discardIfEmpty?: boolean;
 }
 
-export function ChargeSheet({ sessionId, onClose }: Props) {
+/**
+ * The charge sheet for one bill. A split bill's parts, and the bill they came from, open in this
+ * same sheet (`openId`), so paying one share and moving on to the next never goes back through the
+ * Unpaid list.
+ */
+export function ChargeSheet({ sessionId, onClose, discardIfEmpty = false }: Props) {
+  const [openId, setOpenId] = useState(sessionId);
+  const [fromProp, setFromProp] = useState(sessionId);
+  if (fromProp !== sessionId) {
+    setFromProp(sessionId);
+    setOpenId(sessionId);
+  }
+  return (
+    <ChargeSheetBody
+      key={openId}
+      sessionId={openId}
+      onClose={onClose}
+      onOpenBill={setOpenId}
+      discardIfEmpty={discardIfEmpty && openId === sessionId}
+    />
+  );
+}
+
+function ChargeSheetBody({
+  sessionId,
+  onClose,
+  onOpenBill,
+  discardIfEmpty = false,
+}: Props & { onOpenBill: (id: string) => void }) {
   const router = useRouter();
   const toast = useToast();
   const { floor, refetch, version } = useFloor();
@@ -38,6 +83,10 @@ export function ChargeSheet({ sessionId, onClose }: Props) {
   const [confirmCard, setConfirmCard] = useState(false);
   const [alreadyCard, setAlreadyCard] = useState(false);
   const [warnings, setWarnings] = useState<string[]>([]);
+  const [printing, setPrinting] = useState(false);
+  // The server said the amount on screen is no longer the bill's: shown until staff act again.
+  const [changedNote, setChangedNote] = useState<string | null>(null);
+  const [receiptsSent, setReceiptsSent] = useState(0);
   const [onStand] = useStandDevice();
   // Cash through Square POS (the drawer opens there): idle, waiting for the sale, or gave up waiting.
   const [handoff, setHandoff] = useState<"idle" | "waiting" | "gave_up">("idle");
@@ -71,6 +120,10 @@ export function ChargeSheet({ sessionId, onClose }: Props) {
   useLoad(load, version);
 
   const session = detail?.session ?? null;
+  const bill = detail ? billOf(detail) : null;
+  // What the sheet is showing right now. Every money action sends it, so a bill that moved under us
+  // (another iPad, a discount) is refused instead of charged at the new figure.
+  const shownTotal = bill ? bill.totalCents : undefined;
   const live = !!session && session.status === "awaiting_payment" && isCheckoutLive(session.checkout?.status);
   // Stale data must not be paid against: block money actions until a refresh succeeds.
   const stale = loadError !== null;
@@ -103,25 +156,63 @@ export function ChargeSheet({ sessionId, onClose }: Props) {
   }, [live, paused, sessionId, load, refetch]);
 
   const paid = session?.status === "paid";
-  const quietPaid = paid && warnings.length === 0 && !alreadyCard;
+  // A cash customer may want a receipt, so a cash sale on a paired Terminal stays up for 8 s instead
+  // of 2.5 s. A card payment closes as before (the Terminal offers its own receipt). Never mid-print;
+  // after one is sent, a short moment more. A receipt can always be printed later from the bill.
+  const receiptWindow = session?.settledMethod === "cash" && !!floor?.terminalPaired && session.settledCents !== 0;
+
+  // A split bill. A paid share needs to know what to take payment for next; a bill's own parts say
+  // so on the bill itself, and a part reads the bill it came from. `next` is undefined while that
+  // read is on its way, so the sheet stays open rather than closing on someone with shares left.
+  const related = !!session && inSplit(session);
+  const isPart = session?.kind === "part";
+  const parent = useParentBill(isPart ? (session?.splitOfId ?? null) : null, detail);
+  // The bill a part came from, when it can still be paid from here (awaiting payment, no card request live).
+  const parentBill =
+    parent.bill && parent.bill.status === "awaiting_payment" && !isCheckoutLive(parent.bill.checkout?.status) ? parent.bill : null;
+  const next: NextBill | null | undefined =
+    session && session.status === "paid" && related
+      ? isPart && !parent.ready
+        ? undefined
+        : nextUnpaidBill(session, isPart ? parent.bill : session)
+      : null;
+
+  const quietPaid = paid && warnings.length === 0 && !alreadyCard && !printing && next === null;
   useEffect(() => {
     if (!quietPaid) return;
-    const id = setTimeout(() => onCloseRef.current(), 2500);
+    const ms = receiptsSent === 0 && receiptWindow ? 8000 : 2500;
+    const id = setTimeout(() => onCloseRef.current(), ms);
     return () => clearTimeout(id);
-  }, [quietPaid]);
+  }, [quietPaid, receiptWindow, receiptsSent]);
+
+  /**
+   * `bill_changed`: the amount on screen was not the bill's any more, so nothing was done. Reload,
+   * stay here, and say so; staff read the new amount and tap again. Never retried for them.
+   */
+  const onBillChanged = (e: unknown): boolean => {
+    if (!isBillChanged(e)) return false;
+    setChangedNote(errorMessage(e));
+    void load();
+    return true;
+  };
 
   /** Runs a server call, applies its outcome flags, THEN reloads, all before buttons re-enable. */
-  const act = async <T,>(fn: () => Promise<T>, onResult: (r: T) => void): Promise<T | undefined> =>
-    run(async () => {
-      const r = await fn();
-      onResult(r);
-      await load();
-      return r;
-    });
+  const act = async <T,>(fn: () => Promise<T>, onResult: (r: T) => void): Promise<T | undefined> => {
+    setChangedNote(null);
+    return run(
+      async () => {
+        const r = await fn();
+        onResult(r);
+        await load();
+        return r;
+      },
+      { onError: onBillChanged },
+    );
+  };
 
   const handleCharge = (kind: "charge" | "resend") =>
     act(
-      () => (kind === "charge" ? api.charge(sessionId) : api.resend(sessionId)),
+      () => (kind === "charge" ? api.charge(sessionId, shownTotal) : api.resend(sessionId, shownTotal)),
       (r) => {
         if (r.kind === "already_paid_by_card") setAlreadyCard(true);
       },
@@ -138,7 +229,7 @@ export function ChargeSheet({ sessionId, onClose }: Props) {
 
   const handleCash = () =>
     act(
-      () => api.markPaid(sessionId, "cash", false),
+      () => api.markPaid(sessionId, "cash", false, shownTotal),
       (r) => {
         if (r.kind === "already_paid_by_card") setAlreadyCard(true);
         if (r.warnings.length) setWarnings(r.warnings);
@@ -174,12 +265,13 @@ export function ChargeSheet({ sessionId, onClose }: Props) {
   }, [sessionId, load, refetch, router, toast]);
 
   const startHandoff = async () => {
-    const r = await run(() => api.cashHandoff(sessionId), { refetch: false });
+    setChangedNote(null);
+    const r = await run(() => api.cashHandoff(sessionId, shownTotal), { refetch: false, onError: onBillChanged });
     if (!r) return;
     setHandoff("waiting");
     setNotOpened(false);
     setCheckedNotPaid(false);
-    window.location.href = r.url;
+    leaveFor(r.url);
   };
 
   // While waiting: when this page comes back to the front, ask Square. If Square POS never took over
@@ -242,12 +334,39 @@ export function ChargeSheet({ sessionId, onClose }: Props) {
     }
   };
 
-  const bill = detail ? billOf(detail) : null;
   const cashLabelCents = bill && cashDueCents(bill.totalCents) !== bill.totalCents ? cashDueCents(bill.totalCents) : null;
-  const title = session ? `Charge ${sessionTableNames(session)}` : "Charge";
+  // A table's bill is "Charge Table 3"; a counter sale or a part has no table, so it goes by its label.
+  const title = session ? (session.kind === "table" ? `Charge ${billName(session)}` : billName(session)) : "Charge";
+  const nothingToPay = !!bill && bill.totalCents <= 0;
+  // A counter sale with nothing on it isn't a comped bill: it just hasn't been rung up yet.
+  const emptySale = session?.kind === "counter" && session.itemsCents === 0;
+  const busy = pending || stale || handoff !== "idle";
+
+  // Closing the sheet that made a counter sale, with nothing on the bill, throws the bill away, so
+  // empty bills don't pile up in the Unpaid list. It's quiet: if the server says no, the bill just
+  // stays there, which is harmless. Only the sheet that made it does this.
+  const close = () => {
+    if (discardIfEmpty && session && isEmptyCounterSale(session)) {
+      void api
+        .discard(session.id)
+        .then(() => refetch())
+        .catch(() => undefined);
+    }
+    onClose();
+  };
+
+  // An empty counter sale opened from the Unpaid list: thrown away only when staff say so.
+  const canDiscard = !discardIfEmpty && !!session && isEmptyCounterSale(session);
+  const handleDiscard = async () => {
+    const r = await run(() => api.discard(sessionId));
+    if (r) {
+      toast.show("Sale discarded", "success");
+      onClose();
+    }
+  };
 
   return (
-    <Sheet title={title} onClose={onClose} locked={pending}>
+    <Sheet title={title} onClose={close} locked={pending}>
       {!detail ? (
         loadError ? (
           <div className="flex flex-col gap-3">
@@ -269,6 +388,11 @@ export function ChargeSheet({ sessionId, onClose }: Props) {
               </Button>
             </Notice>
           ) : null}
+          {changedNote ? (
+            <Notice tone="warn" strong>
+              {changedNote}
+            </Notice>
+          ) : null}
           {alreadyCard ? (
             <Notice tone="danger" strong>
               {ALREADY_PAID}
@@ -286,10 +410,27 @@ export function ChargeSheet({ sessionId, onClose }: Props) {
 
           <Total detail={detail} cash={mode === "cash" && session?.status === "awaiting_payment"} />
 
-          {session && session.status === "awaiting_payment" && mode === "choose" ? <ItemsPanel session={session} reload={load} busy={pending} /> : null}
+          {session && session.status === "awaiting_payment" && mode === "choose" ? (
+            <>
+              <PartHeader session={session} parent={parentBill} disabled={pending} onOpen={onOpenBill} />
+              <PartsPanel session={session} disabled={pending || live} onOpen={onOpenBill} onChanged={load} />
+              <ItemsPanel session={session} reload={load} busy={pending} />
+              <DiscountPanel session={session} baseCents={bill ? discountBase(bill) : null} reload={load} busy={pending} />
+            </>
+          ) : null}
 
           {session && session.status === "paid" ? (
-            <PaidPanel detail={detail} onClose={onClose} />
+            <>
+              <PaidPanel
+                detail={detail}
+                onClose={onClose}
+                reload={load}
+                onPrinting={setPrinting}
+                onSent={() => setReceiptsSent((n) => n + 1)}
+                extra={next ? <NextBillButton next={next} disabled={pending} onOpen={onOpenBill} /> : null}
+              />
+              <PartsPanel session={session} disabled={pending} onOpen={onOpenBill} onChanged={load} />
+            </>
           ) : session && session.status === "void" ? (
             <>
               <Notice tone="warn">This bill was voided{session.voidReason ? `: ${session.voidReason}` : "."}</Notice>
@@ -356,6 +497,31 @@ export function ChargeSheet({ sessionId, onClose }: Props) {
                 Back
               </Button>
             </div>
+          ) : nothingToPay ? (
+            <div className="flex flex-col gap-3">
+              {emptySale ? (
+                <>
+                  <Notice tone="info">Add something to the sale, then take payment.</Notice>
+                  {canDiscard ? (
+                    <Button size="lg" disabled={pending} onClick={() => void handleDiscard()}>
+                      Discard sale
+                    </Button>
+                  ) : null}
+                </>
+              ) : (
+                <>
+                  {/* Settled with no card and no Square call, so no Charge, Cash or card buttons here. */}
+                  <Button variant="primary" size="lg" disabled={pending || stale} onClick={() => void handleCash()}>
+                    {pending ? "Closing…" : "Nothing to pay. Close bill"}
+                  </Button>
+                </>
+              )}
+              {session?.currentTableId ? (
+                <Button size="lg" disabled={pending} onClick={() => void handleRelease()}>
+                  Leave unpaid
+                </Button>
+              ) : null}
+            </div>
           ) : (
             <div className="flex flex-col gap-3">
               {session?.checkout?.status === "CANCELED" ? <Notice tone="warn">Card not completed. Charge again or take another payment.</Notice> : null}
@@ -364,10 +530,13 @@ export function ChargeSheet({ sessionId, onClose }: Props) {
               ) : null}
               {floor && !floor.terminalPaired ? (
                 <Notice tone="warn">
-                  No Terminal is paired. {session && session.items.length > 0
-                    ? `Ring up ${(billOf(detail)?.tableCents ?? 0) > 0 ? "Table hire and " : ""}the items in Square POS`
-                    : "Ring it up in Square POS"}, then tap
-                  Mark paid – card.
+                  No Terminal is paired.{" "}
+                  {bill && (bill.discountCents > 0 || bill.splitOffCents > 0 || session?.kind === "part")
+                    ? `Ring up ${formatCents(bill.totalCents)} in Square POS`
+                    : session && session.items.length > 0
+                      ? `Ring up ${(billOf(detail)?.tableCents ?? 0) > 0 ? "Table hire and " : ""}the items in Square POS`
+                      : "Ring it up in Square POS"}
+                  , then tap Mark paid – card.
                 </Notice>
               ) : null}
               <Button
@@ -382,6 +551,7 @@ export function ChargeSheet({ sessionId, onClose }: Props) {
                 Cash
                 {cashLabelCents !== null ? <span className="tabular-nums"> · {formatCents(cashLabelCents)}</span> : null}
               </Button>
+              {session ? <SplitButton session={session} disabled={busy} onSplit={load} onBillChanged={setChangedNote} /> : null}
               {session?.currentTableId ? (
                 <Button size="lg" disabled={pending} onClick={() => void handleRelease()}>
                   Leave unpaid
@@ -399,8 +569,15 @@ export function ChargeSheet({ sessionId, onClose }: Props) {
         <CardConfirmDialog
           hasItems={(session?.items.length ?? 0) > 0}
           onClose={() => setConfirmCard(false)}
+          onError={(e) => {
+            // The amount moved: close this, reload, and say so on the sheet.
+            if (!isBillChanged(e)) return false;
+            setConfirmCard(false);
+            return onBillChanged(e);
+          }}
           onConfirm={async () => {
-            const r = await api.markPaid(sessionId, "card", true);
+            setChangedNote(null);
+            const r = await api.markPaid(sessionId, "card", true, shownTotal);
             if (r.warnings.length) setWarnings(r.warnings);
             if (r.kind === "already_paid_by_card") setAlreadyCard(true);
             await load();
@@ -420,9 +597,15 @@ function Total({ detail, cash }: { detail: SessionDetailDTO; cash: boolean }) {
   const minutes = s.billedMinutes ?? b?.billedMinutes ?? null;
   const lines = b && bill && b.totalCents === bill.tableCents ? b.lines : [];
   const groups = groupItems(s.items);
+  const hasTable = s.kind === "table";
+  const adjusted = !!bill && (!!bill.discount || bill.splitOffCents > 0);
   return (
     <section aria-label="Bill" className="rounded-2xl border border-line bg-bg p-4 text-center">
-      {cash && bill ? <p className="text-lg font-semibold text-muted">Cash to collect</p> : null}
+      {cash && bill ? (
+        <p className="text-lg font-semibold text-muted">Cash to collect</p>
+      ) : bill && bill.splitOffCents > 0 && s.status === "awaiting_payment" ? (
+        <p className="text-lg font-semibold text-muted">Left to pay on this bill</p>
+      ) : null}
       <p className="text-6xl font-bold tabular-nums">
         {bill ? formatCents(cash ? cashDueCents(bill.totalCents) : bill.totalCents) : "—"}
       </p>
@@ -432,16 +615,16 @@ function Total({ detail, cash }: { detail: SessionDetailDTO; cash: boolean }) {
         </p>
       ) : null}
       <p className="mt-2 text-lg text-muted">
-        {minutes !== null ? `${minutes} min billed` : "Minutes pending"}
-        {bill ? ` · GST incl. ${formatCents(bill.gstCents)}` : ""}
+        {hasTable ? (minutes !== null ? `${minutes} min billed` : "Minutes pending") : ""}
+        {bill ? `${hasTable ? " · " : ""}GST incl. ${formatCents(bill.gstCents)}` : ""}
       </p>
-      {bill && groups.length > 0 ? (
+      {bill && hasTable && groups.length > 0 ? (
         <p className="mt-1 text-lg text-muted">
           Table <span className="tabular-nums">{formatCents(bill.tableCents)}</span> · Items{" "}
           <span className="tabular-nums">{formatCents(bill.itemsCents)}</span>
         </p>
       ) : null}
-      {lines.length > 0 || groups.length > 0 ? (
+      {lines.length > 0 || groups.length > 0 || adjusted ? (
         <ul className="mt-3 divide-y divide-line border-t border-line text-left text-base">
           {lines.map((l) => (
             <li key={l.rateCardId} className="flex justify-between gap-3 py-2">
@@ -454,12 +637,13 @@ function Total({ detail, cash }: { detail: SessionDetailDTO; cash: boolean }) {
           {groups.map((g) => (
             <li key={g.key} className="flex justify-between gap-3 py-2">
               <span>
-                {g.quantity} × {g.name}
+                {lineLabel(g)}
                 {!g.taxed ? <span className="text-muted"> · GST-free</span> : null}
               </span>
               <span className="tabular-nums">{formatCents(g.cents)}</span>
             </li>
           ))}
+          {bill ? <AdjustmentRows bill={bill} rowClass="flex justify-between gap-3 py-2" /> : null}
         </ul>
       ) : null}
     </section>
@@ -507,18 +691,42 @@ function TerminalPanel({
   );
 }
 
-function PaidPanel({ detail, onClose }: { detail: SessionDetailDTO; onClose: () => void }) {
+function PaidPanel({
+  detail,
+  onClose,
+  reload,
+  onPrinting,
+  onSent,
+  extra,
+}: {
+  detail: SessionDetailDTO;
+  onClose: () => void;
+  reload: () => Promise<void>;
+  onPrinting: (busy: boolean) => void;
+  onSent: () => void;
+  /** Shown above Done: on a split bill, the way on to the next share. */
+  extra?: ReactNode;
+}) {
   const s = detail.session;
+  // A bill with nothing left to pay (a discount covered it) is closed with no payment at all.
+  const nothingPaid = s.settledCents === 0;
   return (
     <section className="flex flex-col gap-3 text-center">
       <div>
         <Badge tone="paid">Paid</Badge>
       </div>
-      <p className="text-xl font-semibold">
-        Paid by {s.settledMethod ?? "—"}
-        {s.settledByName ? ` · ${s.settledByName}` : ""}
-      </p>
-      {s.settledMethod === "cash" && s.settledCents !== null ? (
+      {nothingPaid ? (
+        <p className="text-xl font-semibold">
+          Closed. Nothing to pay.
+          {s.settledByName ? <span className="block text-base font-normal text-muted">{s.settledByName}</span> : null}
+        </p>
+      ) : (
+        <p className="text-xl font-semibold">
+          Paid by {s.settledMethod ?? "—"}
+          {s.settledByName ? ` · ${s.settledByName}` : ""}
+        </p>
+      )}
+      {!nothingPaid && s.settledMethod === "cash" && s.settledCents !== null ? (
         <p className="text-lg text-muted">
           Cash taken <span className="tabular-nums">{formatCents(s.settledCents)}</span>
         </p>
@@ -526,7 +734,9 @@ function PaidPanel({ detail, onClose }: { detail: SessionDetailDTO; onClose: () 
       {s.settledMethod === "cash" && s.squareCash?.state === "failed" ? (
         <Notice tone="warn">Not in Square yet. A manager can retry in Admin → Items.</Notice>
       ) : null}
-      <Button variant="primary" size="lg" onClick={onClose}>
+      <ReceiptButton session={s} recheck={reload} onBusyChange={onPrinting} onSent={onSent} />
+      {extra}
+      <Button variant={extra ? "secondary" : "primary"} size="lg" onClick={onClose}>
         Done
       </Button>
     </section>
@@ -537,10 +747,13 @@ function CardConfirmDialog({
   hasItems,
   onClose,
   onConfirm,
+  onError,
 }: {
   hasItems: boolean;
   onClose: () => void;
   onConfirm: () => Promise<void>;
+  /** Errors the sheet wants to handle itself (the bill's amount moved). Return true if handled. */
+  onError: (e: unknown) => boolean;
 }) {
   const [checked, setChecked] = useState(false);
   return (
@@ -556,6 +769,7 @@ function CardConfirmDialog({
       }
       onSubmit={onConfirm}
       onClose={onClose}
+      onError={onError}
     >
       <label className="flex min-h-14 items-center gap-3 rounded-xl border border-line bg-bg px-4 text-lg">
         <input

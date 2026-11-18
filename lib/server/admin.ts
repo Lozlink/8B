@@ -8,7 +8,7 @@ import { audit } from "./audit";
 import { db, withTx, type Tx } from "./db";
 import { squareEnv, squareEnvironmentOrNull } from "./env";
 import { badRequest, conflict, notFound } from "./errors";
-import { getCatalogState, getProducts, getSettings, mapRateCard, type RateCardRow } from "./repo";
+import { getCatalogState, getDiscounts, getProducts, getSettings, mapRateCard, type RateCardRow } from "./repo";
 import { getCashOutstanding } from "./square-cash";
 
 const by = (a: Actor, m: Manager) => ({ actorStaffId: a.staffId, approvedByStaffId: m.id, deviceLabel: a.deviceLabel });
@@ -30,7 +30,7 @@ const sortedDays = (days: number[]) => [...new Set(days)].sort((a, b) => a - b);
 
 export async function getAdminState(manager: Manager): Promise<AdminStateDTO> {
   const q = db();
-  const [tables, rateCards, settings, staff, devices, products, catalog, squareCash] = await Promise.all([
+  const [tables, rateCards, settings, staff, devices, products, catalog, squareCash, discounts] = await Promise.all([
     q<{ id: string; name: string; sort_order: number; active: boolean }[]>`
       select id, name, sort_order, active from public.tables order by sort_order, name`,
     q<RateCardRow[]>`
@@ -45,6 +45,7 @@ export async function getAdminState(manager: Manager): Promise<AdminStateDTO> {
     getProducts(q, { activeOnly: false }),
     getCatalogState(q),
     getCashOutstanding(q),
+    getDiscounts(q, { activeOnly: false }),
   ]);
   return {
     manager,
@@ -57,6 +58,7 @@ export async function getAdminState(manager: Manager): Promise<AdminStateDTO> {
         category: p.category,
         active: p.active,
       })),
+      discounts: discounts.map((d) => ({ id: d.id, name: d.name, kind: d.kind, value: d.value, active: d.active })),
       syncedAt: catalog.synced_at?.toISOString() ?? null,
       tableHireLinked: !!catalog.table_hire_variation_id,
       lastError: catalog.last_error,

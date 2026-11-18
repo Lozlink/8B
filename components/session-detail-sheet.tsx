@@ -3,16 +3,28 @@
 import { useCallback, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { ActionDialog } from "@/components/action-dialog";
+import { AdjustmentRows } from "@/components/bill-rows";
+import { DiscountPanel } from "@/components/discount-panel";
 import { EditTimesDialog } from "@/components/edit-times-dialog";
 import { ItemsPanel } from "@/components/items-panel";
+import { PaidBillActions, RefundsSection } from "@/components/paid-bill-actions";
+import { PartsPanel } from "@/components/split-panel";
 import { useToast } from "@/components/toast";
 import { Badge, Button, Notice, Sheet, Spinner, type Tone } from "@/components/ui";
 import { api } from "@/lib/client/api";
 import { useLoad } from "@/lib/client/use-load";
 import { authRedirect, errorMessage } from "@/lib/client/errors";
 import { useFloor, useServerNow } from "@/lib/client/floor-context";
-import { billOf } from "@/lib/client/bill-view";
-import { checkoutLabel, estimate, sessionTableNames } from "@/lib/client/session-view";
+import { billCan, billName, billOf, discountBase, groupItems, lineLabel } from "@/lib/client/bill-view";
+import {
+  HAS_REFUNDS_NOTE,
+  REOPENED_TOAST,
+  REOPEN_BUTTON,
+  REOPEN_SUBMIT,
+  REOPEN_TITLE,
+  reopenBlurb,
+} from "@/lib/client/refund-view";
+import { checkoutLabel, estimate } from "@/lib/client/session-view";
 import { can, STATUS_LABEL } from "@/lib/domain/machine";
 import type { SessionDetailDTO } from "@/lib/domain/types";
 import { formatDateTime, formatTime } from "@/lib/format";
@@ -75,8 +87,13 @@ export function SessionDetailSheet({ sessionId, onClose, onCharge }: Props) {
 
   const s = detail?.session ?? null;
 
+  // What a discount would come off: table time (live estimate while running) plus items.
+  const running = !!s && (s.status === "running" || s.status === "paused");
+  const liveEst = detail && s && running && floor ? estimate(s, floor.pricing, nowMs) : null;
+  const billNow = detail ? billOf(detail, running ? (liveEst ? liveEst.totalCents : null) : undefined) : null;
+
   return (
-    <Sheet title={s ? sessionTableNames(s) : "Session"} onClose={onClose} size="lg">
+    <Sheet title={s ? billName(s) : "Session"} onClose={onClose} size="lg">
       {!detail || !s ? (
         error ? (
           <div className="flex flex-col gap-3">
@@ -111,14 +128,14 @@ export function SessionDetailSheet({ sessionId, onClose, onCharge }: Props) {
 
           <dl className="grid grid-cols-1 gap-x-6 gap-y-2 text-base sm:grid-cols-2">
             <Fact label="Opened" value={`${formatDateTime(s.openedAt, tz)} by ${s.openedByName}`} />
-            {s.closedAt ? <Fact label="Closed" value={formatDateTime(s.closedAt, tz)} /> : null}
+            {s.closedAt && s.kind === "table" ? <Fact label="Closed" value={formatDateTime(s.closedAt, tz)} /> : null}
             {s.settledAt ? (
               <Fact
                 label="Settled"
                 value={`${formatDateTime(s.settledAt, tz)} · ${s.settledMethod ?? "—"}${s.settledByName ? ` · ${s.settledByName}` : ""}${s.settledVia ? ` (${viaLabel(s.settledVia, s.settledMethod)})` : ""}`}
               />
             ) : null}
-            {s.settledAt && s.settledCents !== null && s.settledMethod === "cash" ? (
+            {s.settledAt && s.settledCents !== null && s.settledCents > 0 && s.settledMethod === "cash" ? (
               <Fact label="Cash collected" value={formatCents(s.settledCents)} />
             ) : null}
             {s.settledAt && s.settledCents !== null && s.settledMethod === "card" && s.totalCents !== null && s.settledCents !== s.totalCents ? (
@@ -132,25 +149,35 @@ export function SessionDetailSheet({ sessionId, onClose, onCharge }: Props) {
             {s.note ? <Fact label="Note" value={s.note} /> : null}
           </dl>
 
-          <Section title="Table time">
-            <ul className="divide-y divide-line rounded-xl border border-line">
-              {s.intervals
-                .slice()
-                .sort((a, b) => Date.parse(a.startedAt) - Date.parse(b.startedAt))
-                .map((i) => (
-                  <li key={i.id} className="flex justify-between gap-3 px-4 py-3">
-                    <span className="font-semibold">{i.tableName}</span>
-                    <span className="tabular-nums text-muted">
-                      {formatTime(i.startedAt, tz)} – {i.endedAt ? formatTime(i.endedAt, tz) : "now"}
-                    </span>
-                  </li>
-                ))}
-            </ul>
-          </Section>
+          <PaidBillActions session={s} onChanged={changed} stale={error !== null} />
+
+          {s.kind === "table" ? (
+            <Section title="Table time">
+              <ul className="divide-y divide-line rounded-xl border border-line">
+                {s.intervals
+                  .slice()
+                  .sort((a, b) => Date.parse(a.startedAt) - Date.parse(b.startedAt))
+                  .map((i) => (
+                    <li key={i.id} className="flex justify-between gap-3 px-4 py-3">
+                      <span className="font-semibold">{i.tableName}</span>
+                      <span className="tabular-nums text-muted">
+                        {formatTime(i.startedAt, tz)} – {i.endedAt ? formatTime(i.endedAt, tz) : "now"}
+                      </span>
+                    </li>
+                  ))}
+              </ul>
+            </Section>
+          ) : null}
 
           <ItemsPanel session={s} reload={load} />
 
+          <DiscountPanel session={s} baseCents={billNow ? discountBase(billNow) : null} reload={load} />
+
+          <PartsPanel session={s} />
+
           <Breakdown detail={detail} nowMs={nowMs} />
+
+          <RefundsSection detail={detail} tz={tz} reload={load} />
 
           {detail.removedItems.length > 0 ? (
             <Section title="Removed items">
@@ -218,7 +245,7 @@ export function SessionDetailSheet({ sessionId, onClose, onCharge }: Props) {
                 Charge
               </Button>
             ) : null}
-            {can(s.status, "edit_times") ? (
+            {billCan(s, "edit_times") ? (
               <Button size="lg" onClick={() => setDialog("edit")}>
                 Edit times (manager)
               </Button>
@@ -229,9 +256,13 @@ export function SessionDetailSheet({ sessionId, onClose, onCharge }: Props) {
               </Button>
             ) : null}
             {can(s.status, "reverse_paid") ? (
-              <Button variant="danger" size="lg" onClick={() => setDialog("reverse")}>
-                Reverse payment (manager)
-              </Button>
+              s.refundedCents > 0 ? (
+                <p className="text-sm text-muted">{HAS_REFUNDS_NOTE}</p>
+              ) : (
+                <Button variant="danger" size="lg" disabled={error !== null} onClick={() => setDialog("reverse")}>
+                  {REOPEN_BUTTON}
+                </Button>
+              )
             ) : null}
           </div>
         </div>
@@ -268,15 +299,15 @@ export function SessionDetailSheet({ sessionId, onClose, onCharge }: Props) {
 
       {dialog === "reverse" && s ? (
         <ActionDialog
-          title="Reverse payment"
-          description={s.settledMethod === "cash" ? "The bill goes back to unpaid. The app takes the cash sale back out of Square. Hand the cash back yourself. Needs a manager PIN." : "Puts the session back to awaiting payment. Refund any money through Square yourself. Needs a manager PIN."}
+          title={REOPEN_TITLE}
+          description={reopenBlurb(s.settledMethod)}
           requirePin
           danger
-          submitLabel="Reverse payment"
+          submitLabel={REOPEN_SUBMIT}
           onClose={() => setDialog(null)}
           onSubmit={async ({ pin, reason }) => {
             await api.reverse(s.id, pin, reason);
-            toast.show("Payment reversed", "success");
+            toast.show(REOPENED_TOAST, "success");
             await changed();
           }}
         />
@@ -344,13 +375,16 @@ function Breakdown({ detail, nowMs }: { detail: SessionDetailDTO; nowMs: number 
   const lines = live ? (est?.lines ?? []) : b && bill && b.totalCents === bill.tableCents ? b.lines : [];
   const isEstimate = live;
   const hasItems = s.items.length > 0;
+  // Table time, items, then what comes off (discount, the part paid separately), then the total.
+  const isTable = s.kind === "table";
+  const adjusted = !!bill && (!!bill.discount || bill.splitOffCents > 0);
   return (
     <Section title={isEstimate ? "Price (estimate)" : "Price"}>
       {!bill ? (
         <p className="text-muted">No price yet.</p>
       ) : (
         <div className="rounded-xl border border-line">
-          {lines.length > 0 || hasItems ? (
+          {lines.length > 0 || hasItems || adjusted ? (
             <ul className="divide-y divide-line">
               {lines.map((l) => (
                 <li key={l.rateCardId} className="flex justify-between gap-3 px-4 py-3">
@@ -360,24 +394,33 @@ function Breakdown({ detail, nowMs }: { detail: SessionDetailDTO; nowMs: number 
                   <span className="tabular-nums">{formatCents(l.cents)}</span>
                 </li>
               ))}
-              {lines.length === 0 && hasItems ? (
+              {isTable && lines.length === 0 && (hasItems || adjusted) ? (
                 <li className="flex justify-between gap-3 px-4 py-3">
                   <span>Table time</span>
                   <span className="tabular-nums">{formatCents(bill.tableCents)}</span>
                 </li>
               ) : null}
-              {hasItems ? (
-                <li className="flex justify-between gap-3 px-4 py-3">
-                  <span>Items</span>
-                  <span className="tabular-nums">{formatCents(bill.itemsCents)}</span>
-                </li>
-              ) : null}
+              {hasItems && s.kind === "part"
+                ? groupItems(s.items).map((g) => (
+                    <li key={g.key} className="flex justify-between gap-3 px-4 py-3">
+                      <span>{lineLabel(g)}</span>
+                      <span className="tabular-nums">{formatCents(g.cents)}</span>
+                    </li>
+                  ))
+                : hasItems ? (
+                    <li className="flex justify-between gap-3 px-4 py-3">
+                      <span>Items</span>
+                      <span className="tabular-nums">{formatCents(bill.itemsCents)}</span>
+                    </li>
+                  ) : null}
+              <AdjustmentRows bill={bill} rowClass="flex justify-between gap-3 px-4 py-3" />
             </ul>
           ) : null}
           <div className="flex justify-between gap-3 border-t border-line bg-bg px-4 py-3 text-lg font-semibold first:border-t-0">
             <span>
-              Total{isEstimate ? " est." : ""}
-              {minutes !== null ? <span className="font-normal text-muted"> · {minutes} min</span> : null}
+              {bill.splitOffCents > 0 ? "To pay on this bill" : "Total"}
+              {isEstimate ? " est." : ""}
+              {isTable && minutes !== null ? <span className="font-normal text-muted"> · {minutes} min</span> : null}
             </span>
             <span className="tabular-nums">{formatCents(bill.totalCents)}</span>
           </div>

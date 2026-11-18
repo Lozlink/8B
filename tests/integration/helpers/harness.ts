@@ -9,6 +9,7 @@ import { setDbForTests } from "@/lib/server/db";
 import type { Actor, Manager } from "@/lib/server/auth";
 import { setCatalogGatewayForTests } from "@/lib/server/items";
 import { setTerminalGatewayForTests } from "@/lib/server/sessions";
+import { setPaymentsGatewayForTests } from "@/lib/server/payment-ref";
 import { setPosGatewayForTests } from "@/lib/server/pos-cash";
 import { setCashGatewayForTests } from "@/lib/server/square-cash";
 import { FakeCatalog, FakeGateway } from "./fake-gateway";
@@ -35,6 +36,7 @@ export const REFERENCE_SQL = read("20261116000100_reference_data.sql");
 export const SESSION_ITEMS_SQL = read("20261117000000_session_items.sql");
 export const SQUARE_CASH_SQL = read("20261118000000_square_cash.sql");
 export const CHECKOUT_BROADCAST_SQL = read("20261118000100_checkout_broadcast.sql");
+export const BILL_EXTRAS_SQL = read("20261119000000_bill_extras.sql");
 
 /** What Supabase provides out of the box. There is deliberately no `realtime` schema. */
 export const PRELUDE_SQL = `
@@ -89,6 +91,8 @@ export async function bootHarness(): Promise<Harness> {
   await pg.exec(SESSION_ITEMS_SQL);
   await pg.exec(SQUARE_CASH_SQL);
   await pg.exec(CHECKOUT_BROADCAST_SQL);
+  // One transaction, as the Supabase CLI runs a migration file (`set local` needs one).
+  await pg.exec(`begin;\n${BILL_EXTRAS_SQL}\ncommit;`);
 
   const server = new PGLiteSocketServer({ db: pg, port: 0, host: "127.0.0.1" });
   await server.start();
@@ -114,6 +118,8 @@ export async function bootHarness(): Promise<Harness> {
   setTerminalGatewayForTests(gateway);
   setCashGatewayForTests(gateway);
   setPosGatewayForTests(gateway);
+  // Refunds, receipt reprints and the payment id of a completed checkout.
+  setPaymentsGatewayForTests(gateway);
   const catalog = new FakeCatalog();
   setCatalogGatewayForTests(catalog);
 
@@ -147,8 +153,8 @@ export async function bootHarness(): Promise<Harness> {
         // Replica mode skips the no-delete triggers; this is test setup only.
         await pg.exec(`
           set session_replication_role = replica;
-          truncate public.audit_log, public.webhook_events, public.square_cash_records, public.terminal_checkouts, public.session_items,
-            public.session_intervals, public.sessions, public.products, public.login_attempts, public.devices,
+          truncate public.audit_log, public.webhook_events, public.refunds, public.square_cash_records, public.terminal_checkouts,
+            public.session_items, public.session_intervals, public.sessions, public.products, public.discounts, public.login_attempts, public.devices,
             public.rate_cards, public.tables, public.settings, public.staff restart identity cascade;
           update public.catalog_state set synced_at = null, table_hire_variation_id = null, last_error = null;
           set session_replication_role = origin;

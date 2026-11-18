@@ -15,7 +15,8 @@ import { TableCard, type CardActions } from "./table-card";
 
 type Overlay =
   | { kind: "detail"; sessionId: string }
-  | { kind: "charge"; sessionId: string }
+  /** `created`: the charge sheet of a counter sale just made here, which throws it away if closed empty. */
+  | { kind: "charge"; sessionId: string; created?: boolean }
   | { kind: "transfer"; session: SessionDTO }
   | { kind: "stop"; session: SessionDTO }
   | null;
@@ -67,6 +68,13 @@ export function FloorView() {
     }
   };
 
+  // A sale with no table (drinks, snacks, a quick charge). It opens straight in the charge sheet;
+  // if the sheet is closed with nothing on it, the sheet throws the empty bill away.
+  const startCounterSale = async () => {
+    const r = await run(COUNTER_KEY, () => api.counterSale());
+    if (r) setOverlay({ kind: "charge", sessionId: r.sessionId, created: true });
+  };
+
   const doTransfer = async (s: SessionDTO, table: TableDTO) => {
     const ok = await run(keyOf(s), () => api.transfer(s.id, table.id));
     if (ok) {
@@ -77,6 +85,13 @@ export function FloorView() {
 
   return (
     <>
+      {/* Up here, well away from the Start buttons at the foot of each card. */}
+      <div className="mb-4 flex justify-end">
+        <Button disabled={busy(COUNTER_KEY)} onClick={() => void startCounterSale()}>
+          {inFlight(COUNTER_KEY) ? "Opening…" : "Counter sale"}
+        </Button>
+      </div>
+
       {tables.length === 0 ? (
         <p className="py-16 text-center text-lg text-muted">No tables set up. A manager can add them under Admin.</p>
       ) : (
@@ -104,7 +119,9 @@ export function FloorView() {
         />
       ) : null}
 
-      {overlay?.kind === "charge" ? <ChargeSheet sessionId={overlay.sessionId} onClose={() => setOverlay(null)} /> : null}
+      {overlay?.kind === "charge" ? (
+        <ChargeSheet sessionId={overlay.sessionId} discardIfEmpty={overlay.created === true} onClose={() => setOverlay(null)} />
+      ) : null}
 
       {overlay?.kind === "transfer" ? (
         <Sheet title={`Transfer from ${tableName(floor.tables, overlay.session.currentTableId)}`} onClose={() => setOverlay(null)} locked={inFlight(keyOf(overlay.session))}>
@@ -139,6 +156,9 @@ export function FloorView() {
     </>
   );
 }
+
+/** Busy key for the Counter sale button. */
+const COUNTER_KEY = "counter-sale";
 
 /** Busy key for a session's actions: its table (so the card disables), else the session. */
 function keyOf(s: SessionDTO): string {

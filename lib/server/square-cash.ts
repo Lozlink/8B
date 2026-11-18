@@ -1,7 +1,7 @@
 import "server-only";
 import type { SquareCashState } from "@/lib/domain/types";
 import * as orders from "@/lib/square/orders";
-import type { OrderLineInput } from "@/lib/square/orders";
+import type { OrderDiscountInput, OrderLineInput } from "@/lib/square/orders";
 import * as payments from "@/lib/square/payments";
 import type { Actor, Manager } from "./auth";
 import { audit } from "./audit";
@@ -54,7 +54,7 @@ export interface CashRecordRow {
   seq: number;
   amount_cents: number;
   bill_cents: number;
-  /** jsonb: validated by `parseLines` before use. */
+  /** jsonb: validated by `parseStoredOrder` before use. */
   order_lines: unknown;
   note: string | null;
   want: "recorded" | "refunded";
@@ -91,8 +91,35 @@ function isLine(v: unknown): v is OrderLineInput {
   );
 }
 
-/** The order lines stored on a row, or null when the sale goes to Square as a plain amount. */
-function parseLines(v: unknown): OrderLineInput[] | null {
+function isDiscount(v: unknown): v is OrderDiscountInput {
+  if (typeof v !== "object" || v === null) return false;
+  const d = v as Record<string, unknown>;
+  return typeof d.uid === "string" && typeof d.name === "string" && typeof d.amountCents === "number" && Number.isInteger(d.amountCents) && d.amountCents > 0;
+}
+
+/** The Square order stored on a row: its lines and, if the bill had one, its discount. */
+export interface StoredOrder {
+  lines: OrderLineInput[];
+  discount: OrderDiscountInput | null;
+}
+
+/**
+ * What goes in `order_lines`. A bill with no discount is stored as it always was, a bare array of
+ * lines, so the release before this one can still read it (it runs for a short while after the
+ * migration, and again if this release is ever rolled back). Only a bill with a discount uses the
+ * object form; the older release treats that as "no order" and records a plain amount.
+ */
+export function storedOrderJson(lines: OrderLineInput[] | null, discount: OrderDiscountInput | null | undefined): string | null {
+  if (!lines || lines.length === 0) return null;
+  return JSON.stringify(discount && discount.amountCents > 0 ? { lines, discount } : lines);
+}
+
+/**
+ * The order stored on a row, or null when the sale goes to Square as a plain amount. Reads both
+ * shapes: a bare array of lines (every row written before discounts existed, and every row without
+ * one since) and `{ lines, discount }`.
+ */
+export function parseStoredOrder(v: unknown): StoredOrder | null {
   let value = v;
   if (typeof value === "string") {
     try {
@@ -101,17 +128,34 @@ function parseLines(v: unknown): OrderLineInput[] | null {
       return null;
     }
   }
-  if (!Array.isArray(value) || value.length === 0 || !value.every(isLine)) return null;
+  let rawLines: unknown = value;
+  let rawDiscount: unknown = null;
+  if (typeof value === "object" && value !== null && !Array.isArray(value)) {
+    const o = value as Record<string, unknown>;
+    rawLines = o.lines;
+    rawDiscount = o.discount ?? null;
+  }
+  if (!Array.isArray(rawLines) || rawLines.length === 0 || !rawLines.every(isLine)) return null;
+  // A discount we can't read means we don't know the order: record a plain amount rather than
+  // send the lines without it (Square's total would be wrong and the order thrown away anyway).
+  let discount: OrderDiscountInput | null = null;
+  if (rawDiscount !== null) {
+    if (!isDiscount(rawDiscount)) return null;
+    discount = { uid: rawDiscount.uid, name: rawDiscount.name, amountCents: rawDiscount.amountCents };
+  }
   // Rebuilt field by field, in a fixed order: the body sent under an idempotency key must be the
   // same on every try, whatever order the database hands the keys back in.
-  return value.map((l) => ({
-    uid: l.uid,
-    catalogObjectId: l.catalogObjectId,
-    name: l.name,
-    quantity: l.quantity,
-    basePriceCents: l.basePriceCents,
-    note: l.note,
-  }));
+  return {
+    lines: rawLines.map((l) => ({
+      uid: l.uid,
+      catalogObjectId: l.catalogObjectId,
+      name: l.name,
+      quantity: l.quantity,
+      basePriceCents: l.basePriceCents,
+      note: l.note,
+    })),
+    discount,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -127,6 +171,8 @@ export interface EnqueueCashInput {
   note: string | null;
   /** The Square order lines as they stand now, or null to record a plain amount. */
   lines: OrderLineInput[] | null;
+  /** The discount off that order, if the bill has one. Ignored without lines. */
+  discount?: OrderDiscountInput | null;
   staffId: string | null;
   /** Don't send before this many seconds have passed (default: send straight away). */
   holdSeconds?: number;
@@ -144,7 +190,7 @@ export async function enqueueCashRecord(tx: Tx, input: EnqueueCashInput): Promis
   // Square refuses cash that isn't a multiple of 5c, and the table's own check would fail the
   // whole payment. `cashDueCents` never produces one; this is the backstop.
   if (input.amountCents <= 0 || input.amountCents % 5 !== 0 || input.billCents <= 0) return null;
-  const lines = input.lines && input.lines.length > 0 ? JSON.stringify(input.lines) : null;
+  const lines = storedOrderJson(input.lines, input.discount);
   const [row] = await tx<{ seq: number }[]>`
     insert into public.square_cash_records
       (session_id, seq, amount_cents, bill_cents, order_lines, note, created_by, next_attempt_at)
@@ -323,7 +369,9 @@ async function goPlain(row: CashRecordRow, reason: string, detail: Record<string
 async function processRecord(row: CashRecordRow, locationId: string): Promise<void> {
   const q = db();
   const sid = row.session_id;
-  let lines = parseLines(row.order_lines);
+  const stored = parseStoredOrder(row.order_lines);
+  let lines = stored?.lines ?? null;
+  const discount = stored?.discount ?? null;
   let orderId = row.square_order_id;
   let paymentId = row.square_payment_id;
   let refundId = row.square_refund_id;
@@ -342,6 +390,8 @@ async function processRecord(row: CashRecordRow, locationId: string): Promise<vo
             locationId,
             referenceId: sid,
             lines,
+            // Left out when there is none: a row without a discount sends the body it always has.
+            ...(discount ? { discount } : {}),
           });
           if (order.totalCents === row.bill_cents) {
             orderId = order.id;

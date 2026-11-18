@@ -13,10 +13,12 @@ const floor = (over: Partial<FloorDTO> = {}): FloorDTO => ({
   tables: [],
   sessions: [],
   unpaidOffTableCount: 0,
+  unpaidStamp: null,
   pricing: {} as FloorDTO["pricing"],
   terminalPaired: true,
   posCashAvailable: false,
   products: [],
+  discounts: [],
   ...over,
 });
 
@@ -27,6 +29,14 @@ describe("floorFingerprint", () => {
   it("changes when the floor changes", () => {
     expect(floorFingerprint(floor())).not.toBe(floorFingerprint(floor({ unpaidOffTableCount: 1 })));
     expect(floorFingerprint(floor())).not.toBe(floorFingerprint(floor({ terminalPaired: false })));
+  });
+  it("picks up a new top-level field with no other change, so open sheets and the Unpaid list reload", () => {
+    // e.g. the stamp that moves whenever a bill that isn't on a table changes.
+    const a = { ...floor(), unpaidStamp: "t1" };
+    const b = { ...floor(), unpaidStamp: "t2" };
+    expect(floorFingerprint(a)).not.toBe(floorFingerprint(b));
+    expect(floorFingerprint(a)).not.toBe(floorFingerprint(floor()));
+    expect(floorFingerprint(a)).toBe(floorFingerprint({ ...a, serverTime: "2026-11-18T10:00:20.000Z" }));
   });
 });
 

@@ -2,11 +2,11 @@ import "server-only";
 import type { Square } from "square";
 import { square, toUpstreamError } from "./client";
 
-/** Reads every ITEM and CATEGORY object in the catalogue (all pages). Variations come nested in their item. */
+/** Reads every ITEM, CATEGORY and DISCOUNT object in the catalogue (all pages). Variations come nested in their item. */
 export async function listCatalogObjects(): Promise<Square.CatalogObject[]> {
   try {
     const out: Square.CatalogObject[] = [];
-    const page = await square().catalog.list({ types: "ITEM,CATEGORY" });
+    const page = await square().catalog.list({ types: "ITEM,CATEGORY,DISCOUNT" });
     for await (const obj of page) out.push(obj);
     return out;
   } catch (e) {
@@ -26,14 +26,29 @@ export interface CatalogProduct {
   sortOrder: number;
 }
 
+/** A row for `discounts`: one discount staff can put on a bill at our location. */
+export interface CatalogDiscount {
+  /** Square catalogue discount id. */
+  id: string;
+  name: string;
+  /** percent / amount are fixed in Square; the variable kinds have their value typed in when applied. */
+  kind: "percent" | "amount" | "variable_percent" | "variable_amount";
+  /** Basis points (1250 = 12.5%) or cents; null for the variable kinds. */
+  value: number | null;
+}
+
 export interface CatalogMapping {
   products: CatalogProduct[];
   /** The variable-price variation of the "Table hire" item, if the catalogue has one. */
   tableHireVariationId: string | null;
+  /** By name. Empty when the catalogue has none. */
+  discounts: CatalogDiscount[];
 }
 
 const NAME_MAX = 120; // products.name / session_items.name check constraint
 const PRICE_MAX = 1_000_000; // products.price_cents check constraint
+const DISCOUNT_NAME_MAX = 60; // discounts.name / sessions.discount_name check constraint
+const DISCOUNT_AMOUNT_MAX = 1_000_000; // $10,000: more than any bill here; keeps the integer column safe
 
 interface Presence {
   presentAtAllLocations?: boolean;
@@ -77,6 +92,61 @@ function variationsAt(item: Square.CatalogObject.Item, locationId: string): Vari
 }
 
 const byText = (a: string, b: string) => a.localeCompare(b, "en", { sensitivity: "base" }) || (a < b ? -1 : a > b ? 1 : 0);
+
+/**
+ * Square's percentage string ("10", "12.5", "7.25") as basis points, or null if it isn't a plain
+ * decimal, is finer than a hundredth of a percent, or is outside 0–100%. Worked out on the digits,
+ * not with floating point: "12.5" must be exactly 1250.
+ */
+export function percentageToBasisPoints(percentage: string | null | undefined): number | null {
+  const m = /^(\d{1,3})(?:\.(\d+))?$/.exec((percentage ?? "").trim());
+  if (!m) return null;
+  const frac = m[2] ?? "";
+  // Anything past two decimal places must be zeros ("12.500" is fine, "33.333" is not).
+  if (!/^0*$/.test(frac.slice(2))) return null;
+  const bp = Number(m[1]) * 100 + Number(frac.slice(0, 2).padEnd(2, "0"));
+  return bp >= 1 && bp <= 10_000 ? bp : null;
+}
+
+/**
+ * One DISCOUNT object as a row for `discounts`, or null if staff can't use it here: deleted, not
+ * at this location, unnamed, PIN-protected in Square (the app can't ask for a Square PIN), capped
+ * at a maximum amount (the app has no way to apply the cap), not in AUD, or with a value that
+ * can't be read. Never throws: one odd discount must not stop the item list refreshing.
+ */
+function mapDiscount(o: Square.CatalogObject, locationId: string): CatalogDiscount | null {
+  try {
+    if (o.type !== "DISCOUNT" || !o.id || o.isDeleted || !presentAt(o, locationId)) return null;
+    const d = o.discountData;
+    if (!d || d.pinRequired === true) return null;
+    const name = (d.name ?? "").trim().slice(0, DISCOUNT_NAME_MAX).trim();
+    if (!name) return null;
+
+    switch (d.discountType) {
+      case "FIXED_PERCENTAGE": {
+        if (d.maximumAmountMoney?.amount != null) return null;
+        const value = percentageToBasisPoints(d.percentage);
+        return value === null ? null : { id: o.id, name, kind: "percent", value };
+      }
+      case "FIXED_AMOUNT": {
+        const money = d.amountMoney;
+        if (money?.amount == null || money.currency !== "AUD") return null;
+        // Amounts come back as bigint; convert before anything tries to JSON.stringify them.
+        const value = Number(money.amount);
+        if (!Number.isInteger(value) || value < 1 || value > DISCOUNT_AMOUNT_MAX) return null;
+        return { id: o.id, name, kind: "amount", value };
+      }
+      case "VARIABLE_PERCENTAGE":
+        return d.maximumAmountMoney?.amount != null ? null : { id: o.id, name, kind: "variable_percent", value: null };
+      case "VARIABLE_AMOUNT":
+        return { id: o.id, name, kind: "variable_amount", value: null };
+      default:
+        return null;
+    }
+  } catch {
+    return null;
+  }
+}
 
 /**
  * Turns the catalogue into the list staff can sell from. Pure: no I/O.
@@ -141,5 +211,17 @@ export function mapCatalog(objects: readonly Square.CatalogObject[], locationId:
     return byText(a.name, b.name) || byText(a.id, b.id);
   });
 
-  return { products: found.map((p, i) => ({ ...p, sortOrder: i })), tableHireVariationId };
+  // Discounts are read after, and apart from, the items: nothing about a discount can change
+  // which products were found above.
+  const discounts: CatalogDiscount[] = [];
+  const seen = new Set<string>();
+  for (const o of objects) {
+    const d = mapDiscount(o, locationId);
+    if (!d || seen.has(d.id)) continue;
+    seen.add(d.id);
+    discounts.push(d);
+  }
+  discounts.sort((a, b) => byText(a.name, b.name) || byText(a.id, b.id));
+
+  return { products: found.map((p, i) => ({ ...p, sortOrder: i })), tableHireVariationId, discounts };
 }

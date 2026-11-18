@@ -3,13 +3,16 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { useRouter } from "next/navigation";
 import { ActionDialog } from "@/components/action-dialog";
+import { PaidRowActions, RefundStats, RefundedTag, RefundsSummarySection } from "@/components/refund-summary";
 import { SessionDetailSheet } from "@/components/session-detail-sheet";
 import { useToast } from "@/components/toast";
 import { Button, Field, Notice, Spinner, inputClass } from "@/components/ui";
 import { api } from "@/lib/client/api";
+import { billedSubtitle, itemsSoldKey } from "@/lib/client/bill-view";
 import { useLoad } from "@/lib/client/use-load";
 import { authRedirect, errorMessage } from "@/lib/client/errors";
 import { useFloor } from "@/lib/client/floor-context";
+import { REOPENED_TOAST, REOPEN_SUBMIT, REOPEN_TITLE, attentionTitle, reopenBlurb } from "@/lib/client/refund-view";
 import type { SummaryDTO, SummarySessionRow } from "@/lib/domain/types";
 import { formatDateTime, formatTime } from "@/lib/format";
 import { formatCents } from "@/lib/pricing";
@@ -98,11 +101,7 @@ export function SummaryView() {
             <Stat
               title="Billed"
               big={formatCents(data.sessions.billedCents)}
-              sub={
-                data.sessions.itemsCents > 0
-                  ? `Table ${formatCents(data.sessions.tableCents)} · Items ${formatCents(data.sessions.itemsCents)} · GST included`
-                  : "GST included"
-              }
+              sub={billedSubtitle(data.sessions)}
             />
             <Stat title="Paid by card" big={formatCents(data.paid.card.cents)} sub={`${data.paid.card.count} payment${data.paid.card.count === 1 ? "" : "s"}`} />
             <Stat title="Paid by cash" big={formatCents(data.paid.cash.cents)} sub={`${data.paid.cash.count} payment${data.paid.cash.count === 1 ? "" : "s"}${
@@ -111,6 +110,7 @@ export function SummaryView() {
                   : ""
               }`}
             />
+            <RefundStats data={data} />
             <Stat
               title="Unpaid"
               big={formatCents(data.unpaid.cents)}
@@ -145,7 +145,7 @@ export function SummaryView() {
               <ul className="flex flex-col gap-2">
                 {data.attention.map((a) => (
                   <li key={a.id} className="rounded-xl border border-[#c18a22] bg-[#33260a] px-4 py-3">
-                    <p className="font-semibold">{a.action}</p>
+                    <p className="font-semibold">{attentionTitle(a.action)}</p>
                     <p className="text-sm text-muted tabular-nums">
                       {formatDateTime(a.at, tz)}
                       {a.actorName ? ` · ${a.actorName}` : ""}
@@ -170,7 +170,7 @@ export function SummaryView() {
               <h2 className="text-xl font-semibold">Items sold</h2>
               <ul className="divide-y divide-line rounded-xl border border-line bg-surface">
                 {data.itemsSold.map((i) => (
-                  <li key={i.productId} className="flex items-center justify-between gap-3 px-4 py-3">
+                  <li key={itemsSoldKey(i)} className="flex items-center justify-between gap-3 px-4 py-3">
                     <span className="min-w-0 truncate font-semibold">{i.name}</span>
                     <span className="flex shrink-0 gap-4 tabular-nums">
                       <span className="text-muted">× {i.quantity}</span>
@@ -210,6 +210,8 @@ export function SummaryView() {
             )}
           </section>
 
+          <RefundsSummarySection data={data} tz={tz} onOpen={setDetailId} reload={load} stale={error !== null} />
+
           <section aria-label="Paid sessions" className="flex flex-col gap-2">
             <h2 className="text-xl font-semibold">Paid ({data.paidItems.length})</h2>
             {data.paidItems.length === 0 ? (
@@ -217,7 +219,7 @@ export function SummaryView() {
             ) : (
               <ul className="flex flex-col gap-2">
                 {data.paidItems.map((p) => (
-                  <li key={p.id} className="flex items-stretch gap-2">
+                  <li key={p.id} className="flex flex-col gap-2 sm:flex-row sm:items-stretch">
                     <button
                       type="button"
                       onClick={() => setDetailId(p.id)}
@@ -226,7 +228,7 @@ export function SummaryView() {
                       <span className="flex min-w-0 flex-col">
                         <span className="truncate font-semibold">{p.tableNames}</span>
                         <span className="text-sm text-muted tabular-nums">
-                          {formatTime(p.settledAt, tz)} · {p.method}
+                          {formatTime(p.settledAt, tz)} · {p.settledCents === 0 ? "nothing to pay" : p.method}
                           {p.settledByName ? ` · ${p.settledByName}` : ""}
                         </span>
                         {p.method === "cash" && p.squareCash?.state === "failed" ? (
@@ -234,12 +236,19 @@ export function SummaryView() {
                         ) : p.method === "cash" && p.squareCash?.state === "pending" ? (
                           <span className="text-sm text-warn">Sending to Square</span>
                         ) : null}
+                        <RefundedTag row={p} />
                       </span>
                       <span className="text-lg font-semibold tabular-nums">{formatCents(p.settledCents)}</span>
                     </button>
-                    <Button variant="secondary" onClick={() => setReversing(p)}>
-                      Reverse
-                    </Button>
+                    <PaidRowActions
+                      row={p}
+                      stale={error !== null}
+                      onReopen={() => setReversing(p)}
+                      onChanged={async () => {
+                        void refetch();
+                        await load();
+                      }}
+                    />
                   </li>
                 ))}
               </ul>
@@ -252,15 +261,15 @@ export function SummaryView() {
 
       {reversing ? (
         <ActionDialog
-          title={`Reverse ${reversing.tableNames}`}
-          description={reversing.method === "cash" ? "The bill goes back to unpaid. The app takes the cash sale back out of Square. Hand the cash back yourself. Needs a manager PIN." : "Puts the session back to awaiting payment. Refund any money through Square yourself. Needs a manager PIN."}
+          title={`${REOPEN_TITLE}: ${reversing.tableNames}`}
+          description={reopenBlurb(reversing.method)}
           requirePin
           danger
-          submitLabel="Reverse payment"
+          submitLabel={REOPEN_SUBMIT}
           onClose={() => setReversing(null)}
           onSubmit={async ({ pin, reason }) => {
             await api.reverse(reversing.id, pin, reason);
-            toast.show("Payment reversed", "success");
+            toast.show(REOPENED_TOAST, "success");
             void refetch();
             await load();
           }}
@@ -311,7 +320,7 @@ function List({
                   <span className="truncate font-semibold">{r.tableNames}</span>
                   <span className="text-sm text-muted tabular-nums">
                     {formatDateTime(r.openedAt, tz)}
-                    {r.billedMinutes !== null ? ` · ${r.billedMinutes} min` : ""}
+                    {r.kind === "table" && r.billedMinutes !== null ? ` · ${r.billedMinutes} min` : ""}
                   </span>
                 </span>
                 <span className="text-lg font-semibold tabular-nums">{r.totalCents !== null ? formatCents(r.totalCents) : "—"}</span>

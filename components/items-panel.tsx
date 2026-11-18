@@ -2,14 +2,16 @@
 
 import { useRef, useState } from "react";
 import { useRouter } from "next/navigation";
+import { CustomCharge } from "@/components/custom-charge";
 import { useToast } from "@/components/toast";
 import { Button, Sheet } from "@/components/ui";
 import { api, ApiError } from "@/lib/client/api";
+import { billCan, lineLabel } from "@/lib/client/bill-view";
 import { authRedirect, errorMessage } from "@/lib/client/errors";
 import { useFloor } from "@/lib/client/floor-context";
 import { useAction } from "@/lib/client/use-action";
 import { itemCents } from "@/lib/domain/bill";
-import { can, isCheckoutLive } from "@/lib/domain/machine";
+import { isCheckoutLive } from "@/lib/domain/machine";
 import type { SessionDTO, SessionItemDTO } from "@/lib/domain/types";
 import { formatTime } from "@/lib/format";
 import { formatCents } from "@/lib/pricing";
@@ -39,11 +41,19 @@ export function ItemsPanel({ session, reload, busy = false }: Props) {
   const products = floor?.products ?? [];
   const items = session.items;
   const tz = floor?.pricing.settings.timezone ?? "Australia/Sydney";
-  const editable = can(session.status, "add_item");
+  // A part is one share of another bill: nothing is added to it or taken off it.
+  const editable = billCan(session, "add_item");
   const cardLive = session.status === "awaiting_payment" && isCheckoutLive(session.checkout?.status);
   const blocked = cardLive ? "Cancel the card request before changing the bill." : offline ? "No connection. Wait for it to come back before changing the bill." : null;
 
+  if (session.kind === "part") return null;
   if (products.length === 0 && items.length === 0 && !editable) return null;
+
+  /** A request timed out: the server may still be finishing it, so hold the add buttons a moment. */
+  const holdAfterTimeout = () => {
+    setCooling(true);
+    setTimeout(() => setCooling(false), TIMEOUT_HOLD_MS);
+  };
 
   const add = async (productId: string) => {
     if (inflight.current.has(productId)) return;
@@ -58,10 +68,7 @@ export function ItemsPanel({ session, reload, busy = false }: Props) {
         router.replace(dest);
       } else {
         toast.show(errorMessage(e), "error");
-        if (e instanceof ApiError && e.status === 0) {
-          setCooling(true);
-          setTimeout(() => setCooling(false), TIMEOUT_HOLD_MS);
-        }
+        if (e instanceof ApiError && e.status === 0) holdAfterTimeout();
         // The bill may have moved under us (another iPad, or a card request started): resync.
         if (e instanceof ApiError && e.status === 409) await Promise.all([reload(), refetch()]);
       }
@@ -89,13 +96,13 @@ export function ItemsPanel({ session, reload, busy = false }: Props) {
       <h3 className="text-lg font-semibold">Items</h3>
 
       {editable ? (
-        products.length === 0 ? (
-          items.length === 0 ? (
-            <p className="text-muted">No items to add yet. A manager can load them under Admin → Items.</p>
-          ) : null
-        ) : (
-          <>
-            {blocked ? <p className="text-warn">{blocked}</p> : null}
+        <>
+          {blocked ? <p className="text-warn">{blocked}</p> : null}
+          {products.length === 0 ? (
+            items.length === 0 ? (
+              <p className="text-muted">No items to add yet. A manager can load them under Admin → Items.</p>
+            ) : null
+          ) : (
             <ul className="grid grid-cols-2 gap-3 sm:grid-cols-3">
               {products.map((p) => (
                 <li key={p.id} className="flex">
@@ -116,8 +123,14 @@ export function ItemsPanel({ session, reload, busy = false }: Props) {
                 </li>
               ))}
             </ul>
-          </>
-        )
+          )}
+          <CustomCharge
+            sessionId={session.id}
+            disabled={!!blocked || busy || cooling}
+            onAdded={reload}
+            onTimedOut={holdAfterTimeout}
+          />
+        </>
       ) : null}
 
       {items.length > 0 ? (
@@ -126,7 +139,7 @@ export function ItemsPanel({ session, reload, busy = false }: Props) {
             <li key={i.id} className="flex items-center justify-between gap-3 px-4 py-3">
               <div className="min-w-0">
                 <p className="font-semibold">
-                  {i.quantity} × {i.name}
+                  {lineLabel(i)}
                   {!i.taxed ? <span className="ml-2 text-sm font-normal text-muted">GST-free</span> : null}
                 </p>
                 <p className="text-sm text-muted">
@@ -156,7 +169,7 @@ export function ItemsPanel({ session, reload, busy = false }: Props) {
         <Sheet title="Take this off the bill?" onClose={() => setToRemove(null)} raised locked={removing}>
           <div className="flex flex-col gap-5">
             <p className="text-lg">
-              {toRemove.quantity} × {toRemove.name} <span className="tabular-nums text-muted">· {formatCents(itemCents(toRemove))}</span>
+              {lineLabel(toRemove)} <span className="tabular-nums text-muted">· {formatCents(itemCents(toRemove))}</span>
             </p>
             <p className="text-muted">It stays on record as removed.</p>
             <div className="grid grid-cols-2 gap-3">

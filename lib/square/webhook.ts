@@ -44,6 +44,10 @@ export const terminalCheckoutPayload = z.object({
     // Present when the checkout was sent against an itemised order.
     order_id: z.string().optional().nullable(),
     amount_money: z.object({ amount: z.number().int().nonnegative().optional() }).partial().optional().nullable(),
+    // The payment(s) a COMPLETED checkout made: one id for a normal sale. Kept so the payment can be
+    // refunded or its receipt reprinted. Anything that isn't a list of strings is ignored rather
+    // than failing the whole event.
+    payment_ids: z.array(z.string().min(1)).optional().nullable().catch(undefined),
     updated_at: z.string().optional(),
   }),
 });

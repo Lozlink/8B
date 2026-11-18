@@ -2,9 +2,10 @@ import "server-only";
 import { upstream } from "@/lib/server/errors";
 import { square, toUpstreamError } from "./client";
 
-// Both calls are made by the cash outbox (lib/server/square-cash.ts), in the background and outside
-// any database lock. The outbox does the retrying, with the same idempotency key, so the SDK must
-// not: a short timeout and no SDK retry keep one slow call from eating the whole background pass.
+// These calls are made by the cash outbox (lib/server/square-cash.ts) and by manager refunds
+// (lib/server/refunds.ts), outside any database lock. The caller does the retrying, with the same
+// idempotency key, so the SDK must not: a short timeout and no SDK retry keep one slow call from
+// eating the whole background pass (or the manager's patience).
 const REQUEST_OPTIONS = { timeoutInSeconds: 8, maxRetries: 0 } as const;
 const ON_TIMEOUT = "It will be tried again shortly.";
 
@@ -72,7 +73,10 @@ export async function createCashPayment(input: CreateCashPaymentInput): Promise<
 }
 
 export interface RefundPaymentInput {
-  /** `${sessionId}-cr${seq}`. */
+  /**
+   * `${sessionId}-cr${seq}` when a reversed cash sale is taken back out of Square,
+   * `${sessionId}-rf${seq}` for a manager's refund. ≤ 45 chars (Square's limit).
+   */
   idempotencyKey: string;
   paymentId: string;
   amountCents: number;
@@ -86,7 +90,10 @@ export interface SquareRefundState {
   status: string;
 }
 
-/** Refunds a payment the app recorded. For cash this is bookkeeping too: no money moves. */
+/**
+ * Refunds part or all of a payment. For a card the money goes back to the card. For cash it is
+ * bookkeeping: no money moves, staff hand it back.
+ */
 export async function refundPayment(input: RefundPaymentInput): Promise<SquareRefundState> {
   const what = "record the refund";
   try {
@@ -106,6 +113,24 @@ export async function refundPayment(input: RefundPaymentInput): Promise<SquareRe
     return { id: r.id, status: r.status ?? "PENDING" };
   } catch (e) {
     throw toUpstreamError(e, what, ON_TIMEOUT);
+  }
+}
+
+/**
+ * Reads a refund back. A card refund is PENDING when it is made and COMPLETED a few seconds later;
+ * this is how the app finds out (lib/server/refunds.ts). Background work, no lock held: one 8 s try.
+ */
+export async function getRefund(refundId: string): Promise<SquareRefundState> {
+  const what = "check the refund";
+  try {
+    const res = await square().refunds.get({ refundId }, REQUEST_OPTIONS);
+    const r = res.refund;
+    if (!r?.id) {
+      throw upstream(`Square returned an unexpected response while trying to ${what}.`);
+    }
+    return { id: r.id, status: r.status ?? "PENDING" };
+  } catch (e) {
+    throw toUpstreamError(e, what, "It will be checked again shortly.");
   }
 }
 

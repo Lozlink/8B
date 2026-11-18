@@ -279,6 +279,8 @@ describe("getSummary", () => {
       billedCents: 2500 + 2500 + 1875,
       tableCents: 2500 + 2500 + 1875,
       itemsCents: 0,
+      discountCents: 0,
+      writtenOffCents: 0,
     });
     // Paid in window: the 05:55 cash sale is the previous day's.
     expect(sum.paid.card).toEqual({ count: 1, cents: 2500 });
@@ -299,7 +301,7 @@ describe("getSummary", () => {
 
     // previous business day carries the 05:50 session
     const prev = await getSummary("2026-11-19");
-    expect(prev.sessions).toEqual({ count: 1, billedMinutes: 50, billedCents: 2083, tableCents: 2083, itemsCents: 0 });
+    expect(prev.sessions).toEqual({ count: 1, billedMinutes: 50, billedCents: 2083, tableCents: 2083, itemsCents: 0, discountCents: 0, writtenOffCents: 0 });
     expect(prev.paid.cash).toEqual({ count: 1, cents: 2085, roundingCents: 2 }); // $20.83 collected as $20.85
     expect(prev.paid.card.count).toBe(0);
 

@@ -1,9 +1,9 @@
 import "server-only";
 import * as catalog from "@/lib/square/catalog";
-import { db, withTx } from "./db";
+import { db, withTx, type Tx } from "./db";
 import { squareEnv, squareLooksConfigured } from "./env";
 import { AppError } from "./errors";
-import type { ProductRow } from "./repo";
+import type { DiscountRow, ProductRow } from "./repo";
 
 // ---------------------------------------------------------------------------
 // Square catalogue gateway (swappable in tests)
@@ -35,7 +35,7 @@ export async function syncProducts(): Promise<number> {
   try {
     const locationId = squareEnv().SQUARE_LOCATION_ID;
     // Square is called before the transaction opens, so a slow catalogue read holds no locks.
-    const { products, tableHireVariationId } = catalog.mapCatalog(await gateway.list(), locationId);
+    const { products, tableHireVariationId, discounts } = catalog.mapCatalog(await gateway.list(), locationId);
 
     return await withTx(async (tx) => {
       // The state row doubles as the lock: two syncs at once would otherwise both try to insert
@@ -77,9 +77,19 @@ export async function syncProducts(): Promise<number> {
         await tx`update public.products set active = false, synced_at = now() where id = any(${gone}::text[])`;
       }
 
+      // Discounts ride along in the same transaction, behind a savepoint: if writing them fails
+      // for any reason, the item list above is still saved and the discounts stay as they were.
+      let discountsError: string | null = null;
+      try {
+        await tx.savepoint((sp) => syncDiscounts(sp, discounts));
+      } catch (e) {
+        console.warn("[square] discounts not updated", e instanceof Error ? e.message : e);
+        discountsError = "The item list was updated, but the discounts couldn't be. Try again; if it keeps happening, check the discounts in Square.";
+      }
+
       await tx`
         update public.catalog_state
-        set synced_at = now(), last_error = null, table_hire_variation_id = ${tableHireVariationId}
+        set synced_at = now(), last_error = ${discountsError}, table_hire_variation_id = ${tableHireVariationId}
         where id`;
       return products.length;
     });
@@ -92,6 +102,39 @@ export async function syncProducts(): Promise<number> {
       // The database is the problem; the original error is the one worth reporting.
     }
     throw e;
+  }
+}
+
+/**
+ * Brings `discounts` into line with what Square has. Same rules as products: only rows that
+ * changed are written, and a discount that has left the catalogue (or can no longer be used here)
+ * is marked inactive, never deleted, so bills that carry it still say what it was. An empty list
+ * from Square simply deactivates every discount; it never touches products.
+ *
+ * `discounts` has no floor-broadcast trigger, so this is safe in the background refresh.
+ */
+async function syncDiscounts(tx: Tx, discounts: readonly catalog.CatalogDiscount[]): Promise<void> {
+  const existing = await tx<DiscountRow[]>`select id, name, kind, value, active from public.discounts`;
+  const current = new Map(existing.map((r) => [r.id, r]));
+
+  for (const d of discounts) {
+    const row = current.get(d.id);
+    current.delete(d.id);
+    if (!row) {
+      await tx`
+        insert into public.discounts (id, name, kind, value, active)
+        values (${d.id}, ${d.name}, ${d.kind}, ${d.value}, true)`;
+      continue;
+    }
+    if (row.active && row.name === d.name && row.kind === d.kind && row.value === d.value) continue;
+    await tx`
+      update public.discounts set name = ${d.name}, kind = ${d.kind}, value = ${d.value}, active = true, synced_at = now()
+      where id = ${d.id}`;
+  }
+
+  const gone = [...current.values()].filter((r) => r.active).map((r) => r.id);
+  if (gone.length > 0) {
+    await tx`update public.discounts set active = false, synced_at = now() where id = any(${gone}::text[])`;
   }
 }
 

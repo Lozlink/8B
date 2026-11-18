@@ -1,10 +1,10 @@
 "use client";
 
 import { Badge, Button, type Tone } from "@/components/ui";
-import { can, STATUS_LABEL } from "@/lib/domain/machine";
+import { STATUS_LABEL } from "@/lib/domain/machine";
 import type { PricingConfigDTO, SessionDTO, TableDTO } from "@/lib/domain/types";
 import { formatClock } from "@/lib/format";
-import { itemCount, itemsLabel } from "@/lib/client/bill-view";
+import { adjustmentsSummary, billCan, itemCount, itemsLabel, sessionBill } from "@/lib/client/bill-view";
 import { checkoutLabel, estimate } from "@/lib/client/session-view";
 import { formatCents } from "@/lib/pricing";
 
@@ -50,6 +50,9 @@ export function TableCard({ table, session, pricing, nowMs, busy, actions }: Pro
     );
   } else if (status === "running" || status === "paused") {
     const est = estimate(session, pricing, nowMs);
+    // Table time so far plus items, less the discount worked out on those same live figures.
+    const bill = est ? sessionBill(session, { liveTableCents: est.totalCents }) : null;
+    const adjustments = bill ? adjustmentsSummary(bill) : null;
     body = (
       <button
         type="button"
@@ -59,16 +62,19 @@ export function TableCard({ table, session, pricing, nowMs, busy, actions }: Pro
       >
         <span className="text-5xl font-semibold leading-none tabular-nums">{est ? formatClock(est.actualMs) : "—"}</span>
         <span className="mt-2 text-lg text-muted">
-          <span className="tabular-nums">{est ? formatCents(est.totalCents + session.itemsCents) : "—"}</span> est.
+          <span className="tabular-nums">{bill ? formatCents(bill.totalCents) : "—"}</span> est.
           {status === "paused" ? <span className="ml-2 font-semibold text-info">Clock stopped</span> : null}
         </span>
         {session.items.length > 0 ? (
           <span className="mt-0.5 text-base text-muted">incl. {itemsLabel(itemCount(session.items))}</span>
         ) : null}
+        {adjustments ? <span className="mt-0.5 text-base text-muted">{adjustments}</span> : null}
       </button>
     );
   } else {
     const sub = checkoutLabel(session);
+    const bill = sessionBill(session);
+    const adjustments = bill ? adjustmentsSummary(bill) : null;
     body = (
       <button
         type="button"
@@ -83,6 +89,7 @@ export function TableCard({ table, session, pricing, nowMs, busy, actions }: Pro
           {session.billedMinutes !== null ? `${session.billedMinutes} min billed` : "Total pending"}
           {session.items.length > 0 ? ` · ${itemsLabel(itemCount(session.items))}` : ""}
         </span>
+        {adjustments ? <span className="mt-0.5 text-base text-muted">{adjustments}</span> : null}
         <span className={`mt-1 text-base font-semibold ${SUB_TONE[sub.tone]}`}>{sub.label}</span>
       </button>
     );
@@ -109,7 +116,7 @@ export function TableCard({ table, session, pricing, nowMs, busy, actions }: Pro
           </Button>
         ) : (
           <div className="grid grid-cols-3 gap-2">
-            {can(session.status, "pause") ? (
+            {billCan(session, "pause") ? (
               <Button size="lg" className="px-1" disabled={busy} onClick={() => actions.pause(session)}>
                 Pause
               </Button>
@@ -118,10 +125,10 @@ export function TableCard({ table, session, pricing, nowMs, busy, actions }: Pro
                 Resume
               </Button>
             )}
-            <Button size="lg" className="px-1" disabled={busy || !can(session.status, "transfer")} onClick={() => actions.transfer(session)}>
+            <Button size="lg" className="px-1" disabled={busy || !billCan(session, "transfer")} onClick={() => actions.transfer(session)}>
               Transfer
             </Button>
-            <Button variant="danger" size="lg" className="px-1" disabled={busy || !can(session.status, "stop")} onClick={() => actions.stop(session)}>
+            <Button variant="danger" size="lg" className="px-1" disabled={busy || !billCan(session, "stop")} onClick={() => actions.stop(session)}>
               Stop
             </Button>
           </div>

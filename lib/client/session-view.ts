@@ -34,7 +34,7 @@ export function checkoutLabel(session: SessionDTO): { label: string; tone: Check
 }
 
 /** "Table 2 → Table 5" in order of use, without repeats of adjacent names. */
-export function sessionTableNames(session: SessionDTO): string {
+export function sessionTableNames(session: Pick<SessionDTO, "intervals">): string {
   const names: string[] = [];
   for (const i of session.intervals) {
     if (names[names.length - 1] !== i.tableName) names.push(i.tableName);

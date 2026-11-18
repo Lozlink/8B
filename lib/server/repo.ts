@@ -3,7 +3,7 @@ import { parseLocalTime, type PricingRateCard, type PricingSettings, type RateSn
 import { PG, pgCode, type Db } from "./db";
 import { AppError } from "./errors";
 import type { CheckoutStatus, SessionStatus } from "@/lib/domain/machine";
-import type { SettledMethod, SettledVia } from "@/lib/domain/types";
+import type { BillKind, SettledMethod, SettledVia } from "@/lib/domain/types";
 
 // ---------------------------------------------------------------------------
 // Settings & rate cards
@@ -108,11 +108,34 @@ export interface SessionRow {
   closed_at: Date | null;
   closed_by: string | null;
   billed_minutes: number | null;
-  /** The whole bill once closed: table time + items_cents. */
+  /**
+   * What is owed on THIS bill once closed: table time + items_cents − discount_cents −
+   * split_off_cents. Only `repriceBill` (sessions.ts) works it out.
+   */
   total_cents: number | null;
   /** Sum of the live (not removed) items on the bill. */
   items_cents: number;
+  /** Null for counter sales and parts: they have no table time to price. */
   rate_snapshot: RateSnapshot | null;
+  kind: BillKind;
+  /** On a part: the bill it was split from. */
+  split_of: string | null;
+  /** On a bill that was split: the amounts of its parts that still stand (not merged back). */
+  split_off_cents: number;
+  /** A part that was folded back into its bill (it is void, but not a write-off). */
+  merged: boolean;
+  /** Square catalogue discount id; null with a discount set = typed in by a manager. */
+  discount_id: string | null;
+  discount_name: string | null;
+  discount_kind: "percent" | "amount" | null;
+  /** Basis points (percent) or cents (amount). */
+  discount_value: number | null;
+  /** What the discount takes off. 0 while the session is still running. */
+  discount_cents: number;
+  discount_by: string | null;
+  discount_approved_by: string | null;
+  /** Sum of this bill's refunds that have not failed. */
+  refunded_cents: number;
   settled_method: SettledMethod | null;
   settled_via: SettledVia | null;
   settled_by: string | null;
@@ -147,12 +170,20 @@ export interface CheckoutRow {
   last_synced_at: Date | null;
   /** The Square order this attempt was itemised against; null = sent as a plain amount. */
   square_order_id: string | null;
+  /**
+   * The Square payment this checkout made, stored when it is seen COMPLETED. Null before that, and
+   * on rows from before ids were kept (lib/server/payment-ref.ts fetches those on demand).
+   */
+  square_payment_id: string | null;
 }
 
 export interface SessionItemRow {
   id: string;
   session_id: string;
-  product_id: string;
+  /** product = a catalogue item; custom = typed in by staff; split = a part's share of its bill. */
+  kind: "product" | "custom" | "split";
+  /** Set exactly when `kind` is "product". */
+  product_id: string | null;
   name: string;
   unit_cents: number;
   quantity: number;
@@ -181,6 +212,15 @@ export interface CatalogStateRow {
 }
 
 export const BILL_BUSY_MESSAGE = "Someone else is working on this bill. Give it a few seconds and try again.";
+
+/** What a counter sale is called wherever a table's bill would show its table names. */
+export const COUNTER_LABEL = "Counter sale";
+/** What a part is called if its one line can't be found (it always can). */
+export const PART_FALLBACK_LABEL = "Share of a split bill";
+/** Why a thrown-away counter sale is void. The daily summary uses it to tell one from a write-off. */
+export const DISCARD_REASON = "Empty counter sale";
+/** Why a merged-back part is void. */
+export const MERGED_REASON = "Merged back into the bill";
 
 /**
  * Locks and returns a session row for the rest of the transaction. Must be called inside one.
@@ -222,9 +262,55 @@ export async function getCheckouts(q: Db, sessionId: string): Promise<CheckoutRo
 /** Items currently on the bill (not removed), oldest first. */
 export async function getLiveItems(q: Db, sessionId: string): Promise<SessionItemRow[]> {
   return q<SessionItemRow[]>`
-    select id, session_id, product_id, name, unit_cents, quantity, taxed, added_by, added_at, removed_at, removed_by
+    select id, session_id, kind, product_id, name, unit_cents, quantity, taxed, added_by, added_at, removed_at, removed_by
     from public.session_items where session_id = ${sessionId} and removed_at is null
     order by added_at, id`;
+}
+
+export interface DiscountRow {
+  id: string;
+  name: string;
+  kind: "percent" | "amount" | "variable_percent" | "variable_amount";
+  /** Basis points or cents; null for the variable kinds. */
+  value: number | null;
+  active: boolean;
+}
+
+export async function getDiscounts(q: Db, opts: { activeOnly: boolean }): Promise<DiscountRow[]> {
+  return q<DiscountRow[]>`
+    select id, name, kind, value, active
+    from public.discounts
+    where ${opts.activeOnly ? q`active` : q`true`}
+    order by lower(name), id`;
+}
+
+/**
+ * When this bill was last handed to Square POS for cash, if that handoff is still open: it was
+ * made in the last 30 minutes (the window in which pos-cash.ts keeps looking for the sale) and
+ * nothing since has ended it. Null otherwise. While it is set, Square POS may be holding the
+ * amount it was given, so the bill's amount must not change underneath it.
+ *
+ * A handoff is over once any of these is on the bill's audit trail after it:
+ *   - `cash.handoff_canceled`: POS said the sale was cancelled or couldn't be taken;
+ *   - `session.paid` / `session.mark_paid`: the bill was settled (by that sale, by hand, or by
+ *     card). Whatever happens to the bill afterwards, that handoff has run its course;
+ *   - `session.reverse_paid`: a manager reopened it. (Implied by the one above, since a bill can't
+ *     be reopened without having been paid; listed so the rule doesn't hang on that.)
+ * Without the last two, a bill paid through Square POS and then reopened by a manager would
+ * refuse a discount or a split for the rest of the half hour.
+ */
+export async function cashHandoffInProgress(q: Db, sessionId: string): Promise<Date | null> {
+  const [row] = await q<{ at: Date; called_off: boolean }[]>`
+    select h.at, exists (
+      select 1 from public.audit_log c
+      where c.entity = 'session' and c.entity_id = ${sessionId} and c.id > h.id
+        and c.action in ('cash.handoff_canceled', 'session.paid', 'session.mark_paid', 'session.reverse_paid')
+    ) as called_off
+    from public.audit_log h
+    where h.entity = 'session' and h.entity_id = ${sessionId} and h.action = 'cash.handoff_started'
+      and h.at > now() - interval '30 minutes'
+    order by h.id desc limit 1`;
+  return row && !row.called_off ? row.at : null;
 }
 
 export async function getProducts(q: Db, opts: { activeOnly: boolean }): Promise<ProductRow[]> {
@@ -252,6 +338,13 @@ export function auditView(s: SessionRow) {
     billed_minutes: s.billed_minutes,
     total_cents: s.total_cents,
     items_cents: s.items_cents,
+    // Only what is set: a plain table bill's audit rows read as they always have.
+    kind: s.kind === "table" ? undefined : s.kind,
+    split_of: s.split_of ?? undefined,
+    split_off_cents: s.split_off_cents || undefined,
+    discount: s.discount_kind
+      ? { id: s.discount_id, name: s.discount_name, kind: s.discount_kind, value: s.discount_value, cents: s.discount_cents }
+      : undefined,
     settled_method: s.settled_method,
     settled_via: s.settled_via,
     settled_by: s.settled_by,

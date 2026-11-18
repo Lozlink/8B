@@ -8,8 +8,8 @@ import { api } from "@/lib/client/api";
 import { useLoad } from "@/lib/client/use-load";
 import { authRedirect, errorMessage } from "@/lib/client/errors";
 import { useFloor } from "@/lib/client/floor-context";
-import { itemCount, itemsLabel } from "@/lib/client/bill-view";
-import { checkoutLabel, sessionSpan, sessionTableNames } from "@/lib/client/session-view";
+import { adjustmentsSummary, billName, itemCount, itemsLabel, sessionBill } from "@/lib/client/bill-view";
+import { checkoutLabel, sessionSpan } from "@/lib/client/session-view";
 import type { SessionDTO } from "@/lib/domain/types";
 import { formatDateTime, formatTime } from "@/lib/format";
 import { formatCents } from "@/lib/pricing";
@@ -49,8 +49,11 @@ export function UnpaidView() {
       ) : (
         <ul className="flex flex-col gap-3">
           {sessions.map((s) => {
-            const span = sessionSpan(s);
+            // A counter sale or a part has no table time, so it shows when it was opened.
+            const span = s.kind === "table" ? sessionSpan(s) : { start: s.openedAt, end: null };
             const sub = checkoutLabel(s);
+            const bill = sessionBill(s);
+            const adjustments = bill ? adjustmentsSummary(bill) : null;
             return (
               <li key={s.id}>
                 <button
@@ -59,13 +62,14 @@ export function UnpaidView() {
                   className="flex min-h-20 w-full items-center justify-between gap-4 rounded-2xl border-2 border-[#c18a22] bg-surface p-4 text-left active:bg-surface-2"
                 >
                   <span className="flex min-w-0 flex-col gap-0.5">
-                    <span className="truncate text-xl font-bold">{sessionTableNames(s)}</span>
+                    <span className="truncate text-xl font-bold">{billName(s)}</span>
                     <span className="text-base text-muted tabular-nums">
                       {span.start ? formatDateTime(span.start, tz) : "—"}
                       {span.end ? ` – ${formatTime(span.end, tz)}` : ""}
-                      {s.billedMinutes !== null ? ` · ${s.billedMinutes} min` : ""}
-                      {s.items.length > 0 ? ` · ${itemsLabel(itemCount(s.items))}` : ""}
+                      {s.kind === "table" && s.billedMinutes !== null ? ` · ${s.billedMinutes} min` : ""}
+                      {s.kind !== "part" && s.items.length > 0 ? ` · ${itemsLabel(itemCount(s.items))}` : ""}
                     </span>
+                    {adjustments ? <span className="text-base text-muted">{adjustments}</span> : null}
                     <span
                       className={`text-base font-semibold ${sub.tone === "warn" ? "text-warn" : sub.tone === "info" ? "text-info" : "text-muted"}`}
                     >

@@ -9,6 +9,9 @@
  *   401 invalid_credentials   → wrong PIN at login; show the message, stay on the page
  *   403 manager_required      → admin elevation expired → ask for manager PIN again
  *   409 conflict / invalid_transition / pricing_*  → show message, refetch floor
+ *   409 bill_changed          → the bill's total is no longer the `expectedTotalCents` that was sent:
+ *                               another iPad changed it. Nothing was done. Refetch the bill, show the
+ *                               new amount, and let staff tap again.
  *   429 too_many_attempts     → show message
  *   502 square_error          → Square unreachable/refused; show message (staff can fall back to Mark paid)
  *   503 square_not_configured → Square env not set on the server; show message (use Square POS + Mark paid)
@@ -20,6 +23,7 @@ import type {
   MarkPaidOutcome,
   MeDTO,
   PairingCodeDTO,
+  RefundDTO,
   SessionDetailDTO,
   SessionDTO,
   SettledMethod,
@@ -132,8 +136,17 @@ export const api = {
   /** "Leave unpaid": frees the table, bill goes to the unpaid list. */
   release: (id: string) => post<{ ok: true }>(`/api/sessions/${enc(id)}/release`),
 
-  charge: (id: string) => post<ChargeResult>(`/api/sessions/${enc(id)}/charge`),
-  resend: (id: string) => post<ChargeResult>(`/api/sessions/${enc(id)}/resend`),
+  /**
+   * `expectedTotalCents` on charge, resend, markPaid, cashHandoff and split: the bill's
+   * `SessionDTO.totalCents` as the screen showed it when staff tapped (the bill's total, NOT the
+   * 5c-rounded cash amount). If the bill has changed since, the server answers 409 `bill_changed`
+   * and does nothing. Left out, the server acts on whatever the bill is now.
+   */
+  charge: (id: string, expectedTotalCents?: number) =>
+    post<ChargeResult>(`/api/sessions/${enc(id)}/charge`, { expectedTotalCents }),
+  /** A stale `expectedTotalCents` is refused before the request already on the Terminal is cancelled. */
+  resend: (id: string, expectedTotalCents?: number) =>
+    post<ChargeResult>(`/api/sessions/${enc(id)}/resend`, { expectedTotalCents }),
   cancelCheckout: (id: string) =>
     post<{ status: CheckoutStatus | null; paid: boolean; warnings: string[] }>(`/api/sessions/${enc(id)}/cancel-checkout`),
   /** Ask Square now (use while the "Sent to Terminal" panel is open, every ~5 s). */
@@ -143,17 +156,20 @@ export const api = {
    * method "card" requires cardConfirmed: true (staff ticked "approved on Terminal/Square").
    * method "cash": the app records the sale in Square itself (in the background), for the bill
    * rounded to 5c. Staff must NOT also ring it into Square POS.
+   * `expectedTotalCents` (see `charge`): 409 `bill_changed` if the bill is no longer that amount.
    */
-  markPaid: (id: string, method: SettledMethod, cardConfirmed = false) =>
-    post<WithWarnings<MarkPaidOutcome>>(`/api/sessions/${enc(id)}/mark-paid`, { method, cardConfirmed }),
+  markPaid: (id: string, method: SettledMethod, cardConfirmed = false, expectedTotalCents?: number) =>
+    post<WithWarnings<MarkPaidOutcome>>(`/api/sessions/${enc(id)}/mark-paid`, { method, cardConfirmed, expectedTotalCents }),
 
   /**
    * Cash through the Square POS app on this iPad, so the drawer on the Square Stand opens.
    * Returns the link that opens Square POS with the cash amount filled in. Square POS records the
    * sale (amount and a note, not itemised); the app must not also record it. 409 if a card request
    * is live; 503 if Square POS handoff isn't configured.
+   * `expectedTotalCents` (see `charge`) is the bill's total, not the rounded cash amount returned here.
    */
-  cashHandoff: (id: string) => post<{ url: string; amountCents: number }>(`/api/sessions/${enc(id)}/cash-handoff`),
+  cashHandoff: (id: string, expectedTotalCents?: number) =>
+    post<{ url: string; amountCents: number }>(`/api/sessions/${enc(id)}/cash-handoff`, { expectedTotalCents }),
   /**
    * Asks Square whether the cash sale handed to Square POS went through, and settles the bill if
    * so. Call when the app comes back to the front after a handoff, and before offering the manual
@@ -177,8 +193,73 @@ export const api = {
     post<{ ok: true }>(`/api/sessions/${enc(id)}/add-item`, { productId, quantity }),
   /** Takes one item line off the bill (the record is kept). Same rules as addItem. */
   removeItem: (id: string, itemId: string) => post<{ ok: true }>(`/api/sessions/${enc(id)}/remove-item`, { itemId }),
+  /**
+   * A custom charge: a name (1–60 characters) and a price (1c to $2,000) typed in by staff. Same
+   * rules as addItem; taken off again with removeItem.
+   */
+  addCustomItem: (id: string, name: string, amountCents: number) =>
+    post<{ ok: true }>(`/api/sessions/${enc(id)}/add-custom-item`, { name, amountCents }),
+
+  /**
+   * A sale with no table. Creates an empty bill awaiting payment (it shows in the Unpaid list as
+   * "Counter sale"); put items on it and charge it like any bill.
+   */
+  counterSale: () => post<{ sessionId: string }>("/api/sessions/counter"),
+  /** Throws away a counter sale that has nothing on it. No manager needed. 409 otherwise. */
+  discard: (id: string) => post<{ ok: true }>(`/api/sessions/${enc(id)}/discard`),
+
+  /**
+   * Puts a discount on the bill, replacing any already there. Allowed while running, paused or
+   * awaiting payment; 409 if a card request is live, on a part, or once the bill has parts.
+   *   { discountId }                       — a fixed discount from Square; any staff member
+   *   { discountId, value, managerPin }    — a variable discount from Square; value = basis points or cents
+   *   { custom, managerPin }               — typed in by a manager; value = basis points (percent) or cents (amount)
+   */
+  setDiscount: (
+    id: string,
+    body:
+      | { discountId: string }
+      | { discountId: string; value: number; managerPin: string }
+      | { custom: { name: string; kind: "percent" | "amount"; value: number }; managerPin: string },
+  ) => post<{ ok: true }>(`/api/sessions/${enc(id)}/set-discount`, body),
+  removeDiscount: (id: string) => post<{ ok: true }>(`/api/sessions/${enc(id)}/remove-discount`),
+
+  /**
+   * Splits a bill awaiting payment. `ways` (2–10) splits what is owed evenly, this bill keeping one
+   * share and any odd cents; `amountCents` takes one share of that size out. Each share becomes its
+   * own bill (kind "part") in the Unpaid list, paid like any other.
+   * `expectedTotalCents` (see `charge`): what the screen showed as owed on this bill. Send it: two
+   * iPads both tapping "Split 2 ways" on the same amount would otherwise split it twice.
+   */
+  split: (id: string, body: ({ ways: number } | { amountCents: number }) & { expectedTotalCents?: number }) =>
+    post<{ partIds: string[] }>(`/api/sessions/${enc(id)}/split`, body),
+  /** On a part that hasn't been paid: folds it back into the bill it came from. */
+  mergeBack: (partId: string) => post<{ ok: true }>(`/api/sessions/${enc(partId)}/merge-back`),
+
+  /**
+   * Prints a receipt for a paid bill on the Square Terminal. Returns once Square has accepted the
+   * request; the Terminal prints when it is free. 409 if the bill can't have one printed
+   * (SessionDTO.canPrintReceipt says so beforehand).
+   */
+  printReceipt: (id: string) => post<{ ok: true }>(`/api/sessions/${enc(id)}/print-receipt`),
 
   // Manager actions: manager PIN + reason travel with the request.
+  /**
+   * Refunds part or all of a paid bill through Square: back to the card, or (cash) recorded in
+   * Square while staff hand the money back. amountCents ≤ SessionDTO.refundable.maxCents; cash must
+   * be a multiple of 5c. Waits for Square's first answer: the refund comes back `completed`,
+   * `pending` (Square is still processing; it is finished off in the background) — or the call
+   * fails with Square's reason and nothing was refunded. A 4xx always means nothing was refunded;
+   * a 5xx or no answer means it may have gone through.
+   *
+   * `requestId` is a UUID the screen makes ONCE for each refund the manager means to make, and
+   * sends again unchanged on every retry of that same refund (lost answer, timeout, second tap).
+   * The server makes one refund per request id: a repeat returns the refund the first request
+   * made, as it stands now, instead of making another. A new refund needs a new id. The same id
+   * with a different amount, or on a different bill, is a 409 and nothing is written.
+   */
+  refund: (id: string, managerPin: string, reason: string, amountCents: number, requestId: string) =>
+    post<{ refund: RefundDTO }>(`/api/sessions/${enc(id)}/refund`, { managerPin, reason, amountCents, requestId }),
   void: (id: string, managerPin: string, reason: string) =>
     post<{ kind: "voided" } | { kind: "already_paid_by_card" }>(`/api/sessions/${enc(id)}/void`, { managerPin, reason }),
   reverse: (id: string, managerPin: string, reason: string) =>

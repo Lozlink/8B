@@ -13,7 +13,7 @@ import { db, PG, pgCode, pgConstraint, withTx, type Db } from "./db";
 import { posCashConfig, type PosCashConfig } from "./env";
 import { AppError, conflict, notFound } from "./errors";
 import { getCheckouts, getSettings, lockSession } from "./repo";
-import { cancelLiveCheckouts, markPaid, mustLock, repriceBill, sessionNote } from "./sessions";
+import { billChanged, cancelLiveCheckouts, markPaid, mustLock, repriceBill, sessionNote, totalHasMoved, type BillChanged } from "./sessions";
 import { adoptPosPayment, insertPosCashRecord, linkedPayments, PAYMENT_UNIQUE_INDEX } from "./square-cash";
 import { squareStatus } from "./square-errors";
 
@@ -87,10 +87,15 @@ export function posCashAvailable(): boolean {
 /**
  * Builds the link that opens Square POS with this bill's cash amount. Changes nothing on the bill.
  */
-export async function startCashHandoff(actor: Actor, id: string): Promise<{ url: string; amountCents: number }> {
+export async function startCashHandoff(
+  actor: Actor,
+  id: string,
+  /** `expectedTotalCents`: the bill's total (not the rounded cash amount) as the screen showed it, if the request said. */
+  opts: { expectedTotalCents?: number } = {},
+): Promise<{ url: string; amountCents: number }> {
   const cfg = posCashConfig();
   if (!cfg) throw NOT_CONFIGURED();
-  return withTx(async (tx) => {
+  const result = await withTx<{ url: string; amountCents: number } | BillChanged>(async (tx) => {
     const s = await mustLock(tx, id);
     assertCan(s.status, "mark_paid");
     if ((await getCheckouts(tx, id)).some((c) => isCheckoutLive(c.status))) {
@@ -98,6 +103,9 @@ export async function startCashHandoff(actor: Actor, id: string): Promise<{ url:
     }
     // Same re-pricing a card charge does, so the amount handed over is the bill as it stands.
     const { intervals, r, totalCents } = await repriceBill(tx, s, actor);
+    // No link, and no handoff on record, for an amount staff weren't looking at. Returned rather
+    // than thrown so a correction the re-pricing just made is kept (see `BillChanged`).
+    if (totalHasMoved(opts.expectedTotalCents, totalCents)) return { kind: "bill_changed" };
     const amountCents = cashDueCents(totalCents);
     if (amountCents <= 0) throw conflict("There's nothing to collect in cash on this bill.");
 
@@ -121,6 +129,8 @@ export async function startCashHandoff(actor: Actor, id: string): Promise<{ url:
     });
     return { url, amountCents };
   });
+  if ("kind" in result) throw billChanged();
+  return result;
 }
 
 interface Handoff {
@@ -573,12 +583,22 @@ export async function markPaidCheckingPos(
   actor: Actor,
   id: string,
   method: SettledMethod,
-  opts: { cardConfirmed: boolean },
+  /** `expectedTotalCents`: the bill's total as the screen showed it, if the request said. */
+  opts: { cardConfirmed: boolean; expectedTotalCents?: number },
   now = new Date(),
 ): Promise<MarkPaidOutcome & { warnings: string[] }> {
   const cfg = method === "cash" && UUID_RE.test(id) ? posCashConfig() : null;
   const h = cfg ? await latestHandoff(db(), id) : null;
   if (!cfg || !h) return markPaid(actor, id, method, opts, now);
+
+  // The bill was handed to Square POS a little while ago, so Square is asked first. If the screen
+  // was showing a different amount from the bill, stop before any of that: nothing is looked up,
+  // nothing is written. (`markPaid` makes the same check again under the bill's lock.)
+  if (opts.expectedTotalCents !== undefined) {
+    const [bill] = await db()<{ status: string; total_cents: number | null }[]>`
+      select status, total_cents from public.sessions where id = ${id}`;
+    if (bill?.status === "awaiting_payment" && totalHasMoved(opts.expectedTotalCents, bill.total_cents)) throw billChanged();
+  }
 
   try {
     const found = await findSale(cfg, { sessionId: id, ...h });

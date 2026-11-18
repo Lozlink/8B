@@ -5,6 +5,7 @@ import { ActionDialog } from "@/components/action-dialog";
 import { useToast } from "@/components/toast";
 import { Button, Notice } from "@/components/ui";
 import { api } from "@/lib/client/api";
+import { discountWhat } from "@/lib/client/bill-view";
 import { isManagerRequired } from "@/lib/client/errors";
 import { useAction } from "@/lib/client/use-action";
 import { formatDateTime } from "@/lib/format";
@@ -20,6 +21,7 @@ export function ItemsTab({ state, reload, onError }: TabProps) {
 
   // Active items first, in the order the server gave them.
   const products = [...catalog.products].sort((a, b) => Number(b.active) - Number(a.active));
+  const discounts = [...catalog.discounts].sort((a, b) => Number(b.active) - Number(a.active));
 
   const sq = state.squareCash;
   const sendNow = async () => {
@@ -122,6 +124,39 @@ export function ItemsTab({ state, reload, onError }: TabProps) {
           ))}
         </ul>
       )}
+
+      <div className="flex flex-col gap-3">
+        <h3 className="text-lg font-semibold">Discounts</h3>
+        {discounts.length === 0 ? (
+          <p className="rounded-2xl border border-line bg-surface p-4 text-base text-muted">
+            No discounts in Square yet. Set them up in Square and they show here after a refresh. Staff can add them to a bill.
+          </p>
+        ) : (
+          <>
+            <p className="text-base text-muted">From Square. Staff pick these when they add a discount to a bill.</p>
+            <ul className="flex flex-col gap-3">
+              {discounts.map((d) => (
+                <li
+                  key={d.id}
+                  className={`flex items-center justify-between gap-3 rounded-2xl border border-line bg-surface p-4 ${d.active ? "" : "opacity-60"}`}
+                >
+                  <div className="min-w-0">
+                    <p className="break-words text-lg font-semibold">{d.name}</p>
+                    <p className="text-sm text-muted">
+                      {d.active
+                        ? d.kind === "variable_percent" || d.kind === "variable_amount"
+                          ? "Typed in when used. Needs a manager PIN."
+                          : "Fixed in Square"
+                        : "No longer in Square"}
+                    </p>
+                  </div>
+                  <span className="shrink-0 text-lg font-semibold tabular-nums">{discountWhat(d)}</span>
+                </li>
+              ))}
+            </ul>
+          </>
+        )}
+      </div>
 
       <div className="flex items-start justify-between gap-4 rounded-2xl border border-line bg-surface p-4">
         <div className="min-w-0">

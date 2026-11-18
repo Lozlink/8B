@@ -8,6 +8,11 @@ export interface SquareCheckoutState {
   status: CheckoutStatus;
   cancelReason: string | null;
   amountCents: number;
+  /**
+   * The Square payment a COMPLETED checkout made (`payment_ids`; one for a normal sale). Null until
+   * then. It is what a refund or a receipt reprint is asked for against.
+   */
+  paymentId: string | null;
 }
 
 interface SdkCheckout {
@@ -15,6 +20,7 @@ interface SdkCheckout {
   status?: string;
   cancelReason?: string | null;
   amountMoney?: { amount?: bigint | null } | null;
+  paymentIds?: string[] | null;
 }
 
 function toState(c: SdkCheckout | undefined, what: string): SquareCheckoutState {
@@ -27,6 +33,7 @@ function toState(c: SdkCheckout | undefined, what: string): SquareCheckoutState 
     cancelReason: c.cancelReason ?? null,
     // Amounts come back as bigint; convert before anything tries to JSON.stringify them.
     amountCents: c.amountMoney?.amount != null ? Number(c.amountMoney.amount) : 0,
+    paymentId: c.paymentIds?.[0] ?? null,
   };
 }
 
@@ -108,6 +115,56 @@ export async function cancelTerminalCheckout(checkoutId: string): Promise<Square
       return getTerminalCheckout(checkoutId, { underLock: true });
     }
     throw toUpstreamError(e, what);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Receipts (Terminal actions)
+// ---------------------------------------------------------------------------
+
+export interface CreateReceiptActionInput {
+  /** A fresh key for every print request: asking twice is how staff get two copies. */
+  idempotencyKey: string;
+  deviceId: string;
+  /** The payment to print: a card payment made on the Terminal, or a cash payment recorded through the Payments API. */
+  paymentId: string;
+  /** true marks the receipt as a reprint rather than the original. */
+  isDuplicate: boolean;
+}
+
+export interface TerminalActionState {
+  id: string;
+  /** PENDING once Square has accepted it. The Terminal prints when it is free. */
+  status: string;
+}
+
+/**
+ * Asks the Terminal to print a payment's receipt (`type: RECEIPT`, `print_only`: no receipt screen,
+ * straight to the built-in printer). The action waits on the Terminal for up to two minutes, then
+ * Square cancels it. Called with no database lock held; a member of staff is waiting, so one 8 s try.
+ */
+export async function createReceiptAction(input: CreateReceiptActionInput): Promise<TerminalActionState> {
+  const what = "send the receipt to the Terminal";
+  try {
+    const res = await square().terminal.actions.create(
+      {
+        idempotencyKey: input.idempotencyKey,
+        action: {
+          deviceId: input.deviceId,
+          type: "RECEIPT",
+          deadlineDuration: "PT2M",
+          receiptOptions: { paymentId: input.paymentId, printOnly: true, isDuplicate: input.isDuplicate },
+        },
+      },
+      UNDER_LOCK,
+    );
+    const a = res.action;
+    if (!a?.id) {
+      throw upstream(`Square returned an unexpected response while trying to ${what}.`);
+    }
+    return { id: a.id, status: a.status ?? "PENDING" };
+  } catch (e) {
+    throw toUpstreamError(e, what, "It may still print. If it doesn't, try again.");
   }
 }
 

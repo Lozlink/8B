@@ -137,13 +137,19 @@ describe("I1. schema: bill items are kept and locked down", () => {
       h.sql`insert into public.session_items (session_id, product_id, name, unit_cents, quantity, taxed, added_by)
             values (${id}, 'NOPE', 'x', 1, 1, true, ${staff})`,
     ).rejects.toMatchObject({ code: "23503" });
-    // the bill total can never be less than its items
+    // items_cents can never be negative, and neither can a total
     await expect(h.sql`update public.sessions set items_cents = -1 where id = ${id}`).rejects.toMatchObject({ code: "23514" });
     const closed = await awaitingPayment(h, "Table 2", 60);
-    await expect(h.sql`update public.sessions set items_cents = 9999 where id = ${closed}`).rejects.toMatchObject({
-      code: "23514",
-      constraint_name: "sessions_total_covers_items",
-    });
+    await expect(h.sql`update public.sessions set total_cents = -1 where id = ${closed}`).rejects.toMatchObject({ code: "23514" });
+    // "total covers items" is gone on purpose (20261119000000_bill_extras.sql): with a discount or
+    // a split, what is owed can be less than the items on the bill. The app keeps the identity now.
+    const [gone] = await h.raw<{ n: number }>(
+      null,
+      `select count(*)::int as n from pg_constraint where conname = 'sessions_total_covers_items'`,
+    );
+    expect(gone.n).toBe(0);
+    await h.sql`update public.sessions set items_cents = 9999 where id = ${closed}`;
+    await h.sql`update public.sessions set items_cents = 0 where id = ${closed}`;
     expect((await h.rawError(null, "insert into public.catalog_state (id) values (false)")).code).toBe("23514");
     expect((await h.rawError(null, "insert into public.catalog_state (id) values (true)")).code).toBe("23505");
   });

@@ -27,11 +27,32 @@ export type SessionAction =
   | "reverse_paid"
   | "edit_times"
   | "add_item"
-  | "remove_item";
+  | "remove_item"
+  | "set_discount"
+  | "remove_discount"
+  | "split"
+  | "merge_back"
+  | "discard"
+  | "refund"
+  | "print_receipt";
 
+/**
+ * Status rules only. Some actions are also limited by the KIND of bill (lib/domain/types.ts
+ * BillKind), which the server checks separately:
+ *   - a counter sale or a part has no timer: no pause / resume / stop / transfer / edit_times
+ *   - a part takes no items, discount or further split; only a part can be merged back
+ *   - only a counter sale with nothing on it can be discarded
+ */
 const ALLOWED_FROM: Record<SessionAction, readonly SessionStatus[]> = {
   add_item: ["running", "paused", "awaiting_payment"],
   remove_item: ["running", "paused", "awaiting_payment"],
+  set_discount: ["running", "paused", "awaiting_payment"],
+  remove_discount: ["running", "paused", "awaiting_payment"],
+  split: ["awaiting_payment"],
+  merge_back: ["awaiting_payment"],
+  discard: ["awaiting_payment"],
+  refund: ["paid"],
+  print_receipt: ["paid"],
   pause: ["running"],
   resume: ["paused"],
   transfer: ["running", "paused"],
@@ -48,7 +69,7 @@ const ALLOWED_FROM: Record<SessionAction, readonly SessionStatus[]> = {
 };
 
 /** Actions that need a manager PIN and a written reason. */
-export const MANAGER_ACTIONS: ReadonlySet<SessionAction> = new Set(["void", "reverse_paid", "edit_times"]);
+export const MANAGER_ACTIONS: ReadonlySet<SessionAction> = new Set(["void", "reverse_paid", "edit_times", "refund"]);
 
 export class TransitionError extends Error {
   readonly from: SessionStatus;
@@ -93,6 +114,13 @@ const ACTION_LABEL: Record<SessionAction, string> = {
   edit_times: "edit the times of",
   add_item: "add items to",
   remove_item: "remove items from",
+  set_discount: "discount",
+  remove_discount: "take the discount off",
+  split: "split",
+  merge_back: "merge back",
+  discard: "discard",
+  refund: "refund",
+  print_receipt: "print a receipt for",
 };
 
 // ---------------------------------------------------------------------------

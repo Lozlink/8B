@@ -14,6 +14,19 @@ export interface OrderLineInput {
   note: string | null;
 }
 
+/**
+ * A discount off the whole order. Always an amount the app worked out itself (never a percentage,
+ * never a catalogue discount id): Square takes exactly this much off, and the app's total and
+ * Square's can't drift apart on rounding.
+ */
+export interface OrderDiscountInput {
+  /** ≤ 60 chars. */
+  uid: string;
+  /** Shown on the receipt and in Square's reports. */
+  name: string;
+  amountCents: number;
+}
+
 export interface CreateOrderInput {
   /** `${sessionId}-o${attempt}` — ≤ 64 chars; stable until the attempt is committed. */
   idempotencyKey: string;
@@ -21,6 +34,8 @@ export interface CreateOrderInput {
   /** Session id (≤ 40 chars). */
   referenceId: string;
   lines: OrderLineInput[];
+  /** Left out or null = no discount. */
+  discount?: OrderDiscountInput | null;
 }
 
 const ORDER_TIMEOUT_SECONDS = 6;
@@ -55,6 +70,23 @@ export async function createOrder(input: CreateOrderInput): Promise<SquareOrderS
             basePriceMoney: { amount: BigInt(l.basePriceCents), currency: "AUD" as const },
             ...(l.note ? { note: l.note.slice(0, 2000) } : {}),
           })),
+          // Only present when there is a discount, so an order without one is byte for byte the
+          // request it has always been (a retry under an old key must carry the same body).
+          ...(input.discount && input.discount.amountCents > 0
+            ? {
+                discounts: [
+                  {
+                    uid: input.discount.uid,
+                    name: (input.discount.name.trim() || "Discount").slice(0, 255),
+                    // Checked on the sandbox with and without `type`: same answer either way
+                    // (total = lines − amount). Sent explicitly, as Square's reference asks.
+                    type: "FIXED_AMOUNT" as const,
+                    amountMoney: { amount: BigInt(input.discount.amountCents), currency: "AUD" as const },
+                    scope: "ORDER" as const,
+                  },
+                ],
+              }
+            : {}),
         },
       },
       // The order is only the first of up to three Square calls made under the bill's lock (cancel,

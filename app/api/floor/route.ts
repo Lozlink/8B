@@ -3,6 +3,7 @@ import { requireActor } from "@/lib/server/auth";
 import { handler, ok } from "@/lib/server/http";
 import { refreshProductsInBackground } from "@/lib/server/items";
 import { getFloor } from "@/lib/server/queries";
+import { refundsInBackground } from "@/lib/server/refunds";
 import { reconcileInBackground } from "@/lib/server/sessions";
 import { pushCashInBackground } from "@/lib/server/square-cash";
 
@@ -22,5 +23,10 @@ export const GET = handler(async () => {
   // Retry safety net for cash sales that haven't reached Square yet. A read-only check when nothing
   // is due, and it writes only to tables with no floor-broadcast trigger.
   after(pushCashInBackground);
+  // Finishes off refunds Square hasn't confirmed: reads back the ones it is still processing and
+  // re-sends (same key) the ones it never answered. A read-only check when nothing is due. It
+  // writes to `refunds`, which has no floor-broadcast trigger, and to `sessions` only when a refund
+  // has really failed and the amount goes back on the bill.
+  after(refundsInBackground);
   return ok(floor);
 });

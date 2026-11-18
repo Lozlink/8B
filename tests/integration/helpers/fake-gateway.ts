@@ -12,8 +12,9 @@ import type {
   SquarePaymentState,
   SquareRefundState,
 } from "@/lib/square/payments";
-import type { CreateCheckoutInput } from "@/lib/square/terminal";
+import type { CreateCheckoutInput, CreateReceiptActionInput, TerminalActionState } from "@/lib/square/terminal";
 import type { SquareCheckoutState } from "@/lib/square/terminal";
+import type { PaymentsGateway } from "@/lib/server/payment-ref";
 import type { TerminalGateway } from "@/lib/server/sessions";
 
 type Programmed = CheckoutStatus | Error;
@@ -36,7 +37,7 @@ const round5 = (cents: number) => Math.round(cents / 5) * 5;
  * idempotency-key behaviour, and for cash the rules seen in the sandbox: an amount must be a
  * multiple of 5c, and cash for the 5c-rounded total pays an order whose total isn't.
  */
-export class FakeGateway implements TerminalGateway, CashGateway, PosGateway {
+export class FakeGateway implements TerminalGateway, CashGateway, PosGateway, PaymentsGateway {
   creates: CreateCheckoutInput[] = [];
   cancels: string[] = [];
   gets: string[] = [];
@@ -80,6 +81,35 @@ export class FakeGateway implements TerminalGateway, CashGateway, PosGateway {
   refunds: RefundPaymentInput[] = [];
   refundError: Error | null = null;
   refundErrorSticky = false;
+  /** Square answered too slowly: the refund is made (and its key remembered) and THEN refundError is thrown. */
+  refundFailAfterCreating = false;
+  /** Status a brand new refund comes back with. Seen in the sandbox: PENDING, for card and cash alike. */
+  refundCreateStatus = "PENDING";
+  /**
+   * What a PENDING refund has become by the time it is next read (seen in the sandbox: COMPLETED a
+   * few seconds later). "PENDING" keeps it waiting; FAILED / REJECTED hands the money back to the payment.
+   */
+  refundSettlesAs: "COMPLETED" | "PENDING" | "FAILED" | "REJECTED" = "COMPLETED";
+  /** Every getRefund call, in order. */
+  refundGets: string[] = [];
+  /** What `getRefund` does next: throw this, or null for normal. Cleared after one use unless sticky. */
+  refundGetError: Error | null = null;
+  refundGetErrorSticky = false;
+  /** Runs once while a refund read is "at Square", after Square has decided and before the answer comes back. */
+  duringRefundRead: (() => Promise<void>) | null = null;
+  /** Where each refund Square holds stands, by refund id. */
+  refundStatus = new Map<string, string>();
+
+  /** Every receipt the Terminal was asked to print, in order. */
+  receiptActions: CreateReceiptActionInput[] = [];
+  /** What `createReceiptAction` does next: throw this, or null for normal. Cleared after one use unless sticky. */
+  receiptError: Error | null = null;
+  receiptErrorSticky = false;
+  private actionSeq = 0;
+
+  /** The card payment each completed checkout made, by checkout id. */
+  private cardPayments = new Map<string, string>();
+  private cardSeq = 0;
 
   /** Payments Square holds, by payment id. */
   payments = new Map<string, SquarePaymentDetail & { refundedCents: number }>();
@@ -134,6 +164,20 @@ export class FakeGateway implements TerminalGateway, CashGateway, PosGateway {
     this.refunds = [];
     this.refundError = null;
     this.refundErrorSticky = false;
+    this.refundFailAfterCreating = false;
+    this.refundCreateStatus = "PENDING";
+    this.refundSettlesAs = "COMPLETED";
+    this.refundGets = [];
+    this.refundGetError = null;
+    this.refundGetErrorSticky = false;
+    this.duringRefundRead = null;
+    this.refundStatus.clear();
+    this.receiptActions = [];
+    this.receiptError = null;
+    this.receiptErrorSticky = false;
+    this.actionSeq = 0;
+    this.cardPayments.clear();
+    this.cardSeq = 0;
     this.payments.clear();
     this.posOrders.clear();
     this.posReads = [];
@@ -269,29 +313,101 @@ export class FakeGateway implements TerminalGateway, CashGateway, PosGateway {
 
   refundPayment = async (input: RefundPaymentInput): Promise<SquareRefundState> => {
     this.refunds.push(input);
+    let late: Error | null = null;
     if (this.refundError) {
       const e = this.refundError;
       if (!this.refundErrorSticky) this.refundError = null;
-      throw e;
+      if (!this.refundFailAfterCreating) throw e;
+      late = e;
     }
     const { idempotencyKey, ...rest } = input;
     const body = JSON.stringify(rest);
     const existing = this.refundByKey.get(idempotencyKey);
     if (existing) {
       if (existing.body !== body) throw squareRejection(400, "IDEMPOTENCY_KEY_REUSED");
-      return existing.state;
+      if (late) throw late;
+      // The same key again gives the same refund back, as it stands now.
+      return { id: existing.state.id, status: this.refundStatus.get(existing.state.id) ?? existing.state.status };
     }
     const payment = this.payments.get(input.paymentId);
     if (!payment) throw squareRejection(404, "NOT_FOUND");
     if (input.amountCents <= 0 || payment.refundedCents + input.amountCents > payment.amountCents) {
       throw squareRejection(400, "REFUND_AMOUNT_INVALID", "Square couldn't record the refund: the amount is more than what is left to refund.");
     }
-    payment.refundedCents += input.amountCents;
-    // A cash refund starts PENDING and completes on its own.
-    const state: SquareRefundState = { id: `ref_${++this.refundSeq}`, status: "PENDING" };
+    // A refund starts PENDING (card and cash alike) and completes on its own a few seconds later.
+    const state: SquareRefundState = { id: `ref_${++this.refundSeq}`, status: this.refundCreateStatus };
     this.refundByKey.set(idempotencyKey, { body, state });
+    this.refundStatus.set(state.id, state.status);
     this.refundsHeld.set(state.id, { paymentId: input.paymentId, amountCents: input.amountCents });
+    // A refund that fails outright never takes anything off the payment.
+    if (state.status !== "FAILED" && state.status !== "REJECTED") payment.refundedCents += input.amountCents;
+    if (late) throw late;
     return state;
+  };
+
+  /** Reads a refund back. A PENDING one moves on to `refundSettlesAs` the first time it is read. */
+  getRefund = async (refundId: string): Promise<SquareRefundState> => {
+    this.refundGets.push(refundId);
+    if (this.refundGetError) {
+      const e = this.refundGetError;
+      if (!this.refundGetErrorSticky) this.refundGetError = null;
+      throw e;
+    }
+    const held = this.refundsHeld.get(refundId);
+    let status = this.refundStatus.get(refundId);
+    if (!held || !status) throw squareRejection(404, "NOT_FOUND");
+    if (status === "PENDING" && this.refundSettlesAs !== "PENDING") {
+      status = this.refundSettlesAs;
+      this.refundStatus.set(refundId, status);
+      if (status === "FAILED" || status === "REJECTED") {
+        // The refund never happened: the money is refundable on the payment again.
+        const payment = this.payments.get(held.paymentId);
+        if (payment) payment.refundedCents -= held.amountCents;
+      }
+    }
+    if (this.duringRefundRead) {
+      const hook = this.duringRefundRead;
+      this.duringRefundRead = null;
+      await hook();
+    }
+    return { id: refundId, status };
+  };
+
+  /**
+   * The Square payment a completed checkout made (`payment_ids` has one id for a normal sale).
+   * Made the first time it is asked for; a simulated webhook passes it as `paymentIds`.
+   */
+  cardPaymentFor(checkoutId: string, amountCents?: number): string {
+    const known = this.cardPayments.get(checkoutId);
+    if (known) return known;
+    const id = `cardpay_${++this.cardSeq}`;
+    const sent = [...this.byKey.values()].find((s) => s.state.id === checkoutId)?.state.amountCents;
+    this.cardPayments.set(checkoutId, id);
+    this.payments.set(id, {
+      id,
+      status: "COMPLETED",
+      sourceType: "CARD",
+      amountCents: amountCents ?? sent ?? 0,
+      locationId: "LOC_TEST",
+      orderId: null,
+      note: null,
+      referenceId: null,
+      createdAt: new Date().toISOString(),
+      refundedCents: 0,
+    });
+    return id;
+  }
+
+  /** A RECEIPT Terminal action: Square accepts it (PENDING) for a payment it holds, and the Terminal prints later. */
+  createReceiptAction = async (input: CreateReceiptActionInput): Promise<TerminalActionState> => {
+    this.receiptActions.push(input);
+    if (this.receiptError) {
+      const e = this.receiptError;
+      if (!this.receiptErrorSticky) this.receiptError = null;
+      throw e;
+    }
+    if (!this.payments.has(input.paymentId)) throw squareRejection(404, "NOT_FOUND");
+    return { id: `act_${++this.actionSeq}`, status: "PENDING" };
   };
 
   createOrder = async (input: CreateOrderInput): Promise<SquareOrderState> => {
@@ -311,8 +427,10 @@ export class FakeGateway implements TerminalGateway, CashGateway, PosGateway {
       if (existing.body !== body) throw squareRejection(400, "IDEMPOTENCY_KEY_REUSED");
       return existing.state;
     }
-    // GST is inclusive, so Square's total is the sum of the lines.
-    const total = input.lines.reduce((sum, l) => sum + l.basePriceCents * l.quantity, 0);
+    // GST is inclusive, so Square's total is the sum of the lines, less an ORDER-scope amount
+    // discount if there is one (seen in the sandbox: total = lines − amount, never below zero).
+    const lines = input.lines.reduce((sum, l) => sum + l.basePriceCents * l.quantity, 0);
+    const total = Math.max(0, lines - (input.discount?.amountCents ?? 0));
     const state: SquareOrderState = { id: `ord_${++this.orderSeq}`, totalCents: total + this.orderTotalSkewCents };
     this.orderByKey.set(idempotencyKey, { body, state });
     if (late) throw late;
@@ -351,8 +469,11 @@ export class FakeGateway implements TerminalGateway, CashGateway, PosGateway {
       status: this.createStatus,
       cancelReason: null,
       amountCents: input.amountCents,
+      paymentId: null,
     };
     this.byKey.set(idempotencyKey, { body, state });
+    // A checkout that is already COMPLETED carries the payment it made.
+    if (state.status === "COMPLETED") state.paymentId = this.cardPaymentFor(state.id);
     if (late) throw late;
     return state;
   };
@@ -370,7 +491,14 @@ export class FakeGateway implements TerminalGateway, CashGateway, PosGateway {
   private answer(id: string, p: Programmed): SquareCheckoutState {
     if (p instanceof Error) throw p;
     const amountCents = [...this.byKey.values()].find((s) => s.state.id === id)?.state.amountCents ?? 0;
-    return { id, status: p, cancelReason: p === "CANCELED" ? "SELLER_CANCELED" : null, amountCents };
+    return {
+      id,
+      status: p,
+      cancelReason: p === "CANCELED" ? "SELLER_CANCELED" : null,
+      amountCents,
+      // A completed checkout carries the payment it made.
+      paymentId: p === "COMPLETED" ? this.cardPaymentFor(id) : null,
+    };
   }
 }
 

@@ -231,7 +231,7 @@ describe("C1. catalogue mapping", () => {
     const hire = (name: string, vars: Square.CatalogObject.ItemVariation[], o: ItemOpts = {}) => item("I_HIRE", name, vars, o);
     const open = variation("V_HIRE", { pricing: "VARIABLE_PRICING" });
 
-    expect(mapCatalog([hire("  TABLE Hire ", [open])], LOC)).toEqual({ products: [], tableHireVariationId: "V_HIRE" });
+    expect(mapCatalog([hire("  TABLE Hire ", [open])], LOC)).toEqual({ products: [], tableHireVariationId: "V_HIRE", discounts: [] });
     expect(mapCatalog([hire("Table hire (per hour)", [open])], LOC).tableHireVariationId).toBeNull();
     expect(mapCatalog([hire("Table hire", [variation("V_FIXED", { cents: 2500 })])], LOC).tableHireVariationId).toBeNull();
     expect(mapCatalog([hire("Table hire", [variation("V_HIRE", { pricing: "VARIABLE_PRICING", presence: { absentAtLocationIds: [LOC] } })])], LOC).tableHireVariationId).toBeNull();
@@ -514,6 +514,7 @@ describe("C4. DTOs", () => {
     expect(sa?.items).toEqual([
       {
         id: coke,
+        kind: "product",
         productId: "VAR_COKE",
         name: "Coke",
         unitCents: 450,
@@ -622,6 +623,8 @@ describe("C4. DTOs", () => {
       billedCents: 5000 + 900 + 600 + 1350,
       tableCents: 5000,
       itemsCents: 900 + 600 + 1350,
+      discountCents: 0,
+      writtenOffCents: 0,
     });
     expect(sum.sessions.tableCents + sum.sessions.itemsCents).toBe(sum.sessions.billedCents);
     expect(sum.itemsSold).toEqual([
@@ -637,7 +640,7 @@ describe("C4. DTOs", () => {
   it("summary with nothing sold", async () => {
     const sum = await getSummary("2026-11-20");
     expect(sum.itemsSold).toEqual([]);
-    expect(sum.sessions).toEqual({ count: 0, billedMinutes: 0, billedCents: 0, tableCents: 0, itemsCents: 0 });
+    expect(sum.sessions).toEqual({ count: 0, billedMinutes: 0, billedCents: 0, tableCents: 0, itemsCents: 0, discountCents: 0, writtenOffCents: 0 });
   });
 
   it("admin state: every product incl. inactive, sync status and the itemise switch", async () => {
@@ -649,6 +652,7 @@ describe("C4. DTOs", () => {
         { id: "VAR_CHIPS", name: "Chips", priceCents: 600, taxed: true, category: null, active: true },
         { id: "VAR_OLD", name: "Old pie", priceCents: 500, taxed: true, category: null, active: false },
       ],
+      discounts: [],
       syncedAt: null,
       tableHireLinked: false,
       lastError: null,

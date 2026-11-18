@@ -42,7 +42,31 @@ describe("session state machine", () => {
   });
 
   it("manager-only actions", () => {
-    expect([...MANAGER_ACTIONS].sort()).toEqual(["edit_times", "reverse_paid", "void"]);
+    expect([...MANAGER_ACTIONS].sort()).toEqual(["edit_times", "refund", "reverse_paid", "void"]);
+  });
+
+  it("only a paid bill can be refunded or have a receipt printed", () => {
+    for (const from of ["running", "paused", "awaiting_payment", "void"] as const) {
+      expect(can(from, "refund")).toBe(false);
+      expect(can(from, "print_receipt")).toBe(false);
+    }
+    expect(can("paid", "refund")).toBe(true);
+    expect(can("paid", "print_receipt")).toBe(true);
+  });
+
+  it("discounts follow the items rule; splitting needs a closed, unpaid bill", () => {
+    for (const from of ["running", "paused", "awaiting_payment"] as const) {
+      expect(can(from, "set_discount")).toBe(true);
+      expect(can(from, "remove_discount")).toBe(true);
+    }
+    for (const from of ["paid", "void"] as const) {
+      expect(can(from, "set_discount")).toBe(false);
+      expect(can(from, "remove_discount")).toBe(false);
+    }
+    for (const action of ["split", "merge_back", "discard"] as const) {
+      expect(can("awaiting_payment", action)).toBe(true);
+      for (const from of ["running", "paused", "paid", "void"] as const) expect(can(from, action)).toBe(false);
+    }
   });
 
   it("treats CANCEL_REQUESTED as still able to take money", () => {
