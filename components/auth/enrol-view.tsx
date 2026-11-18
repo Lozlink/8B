@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import { Button, Field, Notice, Spinner, inputClass } from "@/components/ui";
+import { BrandMark, Button, Field, Notice, Spinner, inputClass } from "@/components/ui";
 import { api } from "@/lib/client/api";
 import { errorMessage } from "@/lib/client/errors";
 
@@ -94,10 +94,11 @@ export function EnrolView() {
       }}
     >
       <div className="text-center">
-        <p aria-hidden className="text-5xl">
-          🎱
-        </p>
-        <h1 className="mt-2 text-3xl font-bold">Set up this iPad</h1>
+        <div className="flex justify-center">
+          <BrandMark size={72} />
+        </div>
+        <p className="mt-3 text-lg font-semibold text-brand">8 Ball Lounge</p>
+        <h1 className="mt-1 text-3xl font-bold">Set up this iPad</h1>
         <p className="mt-1 text-muted">Ask a manager for the enrolment code.</p>
       </div>
 
@@ -134,7 +135,7 @@ export function EnrolView() {
 
       {setupNeeded ? (
         <fieldset className="flex flex-col gap-3 rounded-2xl border border-line p-4">
-          <legend className="px-2 text-base font-semibold text-brass">First manager</legend>
+          <legend className="px-2 text-base font-semibold text-accent">First manager</legend>
           <p className="text-sm text-muted">No manager exists yet. Create the first one now (PIN of 4 to 6 digits).</p>
           <Field label="Name">
             <input className={inputClass} value={mgrName} onChange={(e) => setMgrName(e.target.value)} maxLength={40} />

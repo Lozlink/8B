@@ -32,7 +32,7 @@ interface Props {
   /** Called once Square has accepted a print request. */
   onSent?: () => void;
   size?: "md" | "lg";
-  variant?: "primary" | "secondary" | "brass";
+  variant?: "primary" | "secondary" | "accent";
   className?: string;
 }
 

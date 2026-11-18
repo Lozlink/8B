@@ -119,6 +119,8 @@ export class FakeGateway implements TerminalGateway, CashGateway, PosGateway, Pa
   posReads: string[] = [];
   /** Throw this from every POS read (stays until cleared). */
   posError: Error | null = null;
+  /** Payment reads come back with no refunded total on them. */
+  hideRefundedTotal = false;
   private posSeq = 0;
   /** Orders that have been paid: order id → the total after Square's cash rounding. */
   paidOrders = new Map<string, number>();
@@ -182,6 +184,7 @@ export class FakeGateway implements TerminalGateway, CashGateway, PosGateway, Pa
     this.posOrders.clear();
     this.posReads = [];
     this.posError = null;
+    this.hideRefundedTotal = false;
     this.posSeq = 0;
     this.paidOrders.clear();
     this.refundsHeld.clear();
@@ -281,9 +284,14 @@ export class FakeGateway implements TerminalGateway, CashGateway, PosGateway, Pa
   private detail(id: string): SquarePaymentDetail | null {
     const p = this.payments.get(id);
     if (!p) return null;
-    const { refundedCents: _refunded, ...detail } = p;
-    void _refunded;
-    return detail;
+    return { ...p, refundedCents: this.hideRefundedTotal ? null : p.refundedCents };
+  }
+
+  /** A refund someone made in Square Dashboard: on the payment's refunded total, unknown to the app. */
+  refundedElsewhere(paymentId: string, cents: number): void {
+    const p = this.payments.get(paymentId);
+    if (!p) throw new Error(`no payment ${paymentId}`);
+    p.refundedCents += cents;
   }
 
   getOrder = async (orderId: string): Promise<SquareOrderDetail> => {

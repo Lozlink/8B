@@ -91,6 +91,8 @@ export interface RefundDTO {
   state: "pending" | "completed" | "failed";
   /** Why it failed or is still waiting, if known. Staff-readable. */
   error: string | null;
+  /** the app has stopped trying; a manager has to look at this payment in Square and say what happened */
+  needsCheck: boolean;
   createdAt: string;
   byName: string;
   approvedByName: string;

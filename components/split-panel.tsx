@@ -153,7 +153,7 @@ function SplitSheet({
                 setError(null);
               }}
               className={`min-h-12 rounded-xl border px-3 text-base font-semibold transition-colors disabled:opacity-45 ${
-                mode === m ? "border-[#2f9265] bg-felt text-white" : "border-line bg-surface-2 text-chalk active:bg-line"
+                mode === m ? "border-brand bg-brand text-on-brand" : "border-line bg-surface-2 text-chalk active:bg-line"
               }`}
             >
               {label}
@@ -175,7 +175,7 @@ function SplitSheet({
                     disabled={pending || !ok}
                     onClick={() => setWays(n)}
                     className={`min-h-14 rounded-xl border text-xl font-semibold tabular-nums transition-colors disabled:opacity-45 ${
-                      ways === n ? "border-[#2f9265] bg-felt text-white" : "border-line bg-surface-2 text-chalk active:bg-line"
+                      ways === n ? "border-brand bg-brand text-on-brand" : "border-line bg-surface-2 text-chalk active:bg-line"
                     }`}
                   >
                     {n}
@@ -420,7 +420,7 @@ export function PartHeader({ session, parent, disabled, onOpen }: PartHeaderProp
 /** On a paid bill that was part of a split: straight on to the next share. */
 export function NextBillButton({ next, disabled, onOpen }: { next: NextBill; disabled: boolean; onOpen: (id: string) => void }) {
   return (
-    <Button variant="brass" size="lg" disabled={disabled} onClick={() => onOpen(next.id)}>
+    <Button variant="accent" size="lg" disabled={disabled} onClick={() => onOpen(next.id)}>
       {next.kind === "part" ? "Next part" : `Back to ${next.label}`}
       <span className="tabular-nums"> · {formatCents(next.amountCents)}</span>
     </Button>

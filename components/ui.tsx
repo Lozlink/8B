@@ -6,12 +6,12 @@ import { useEffect, useRef, type ButtonHTMLAttributes, type ReactNode } from "re
 // Button
 // ---------------------------------------------------------------------------
 
-type Variant = "primary" | "secondary" | "danger" | "ghost" | "brass";
+type Variant = "primary" | "secondary" | "danger" | "ghost" | "accent";
 type Size = "md" | "lg";
 
 const VARIANT: Record<Variant, string> = {
-  primary: "bg-felt text-white active:bg-felt-dark",
-  brass: "bg-brass text-[#1a1305] active:bg-[#b99443]",
+  primary: "bg-brand text-on-brand active:bg-brand-dark",
+  accent: "bg-accent text-[#1a1305] active:bg-[#d8c7ae]",
   secondary: "border border-line bg-surface-2 text-chalk active:bg-line",
   danger: "bg-danger text-white active:bg-[#a0352d]",
   ghost: "text-chalk active:bg-surface-2",
@@ -122,7 +122,7 @@ export function Sheet({ title, onClose, children, raised, size = "md", locked }:
 export type Tone = "free" | "running" | "paused" | "awaiting" | "paid" | "void" | "neutral";
 
 const TONE: Record<Tone, string> = {
-  free: "bg-[#26362e] text-chalk border-[#3a5046]",
+  free: "bg-[#262626] text-chalk border-[#444444]",
   running: "bg-[#1b6845] text-[#eafff3] border-[#2f9265]",
   paused: "bg-[#1f4d7a] text-[#e4f2ff] border-[#3a77b0]",
   awaiting: "bg-[#8a5f12] text-[#fff3d6] border-[#c18a22]",
@@ -154,7 +154,7 @@ export function Notice({
     info: "border-[#3a77b0] bg-[#12263a]",
     warn: "border-[#c18a22] bg-[#33260a]",
     danger: "border-danger bg-[#3a1815]",
-    success: "border-felt bg-[#14301f]",
+    success: "border-success bg-[#14301f]",
   }[tone];
   return (
     <div
@@ -186,8 +186,25 @@ export function Field({ label, hint, children }: { label: string; hint?: string;
 }
 
 export const inputClass =
-  "min-h-12 w-full rounded-xl border border-line bg-bg px-3 text-base text-chalk placeholder:text-[#6b7d73] disabled:opacity-50";
+  "min-h-12 w-full rounded-xl border border-line bg-bg px-3 text-base text-chalk placeholder:text-[#77716a] disabled:opacity-50";
 
 export function Money({ children, className = "" }: { children: ReactNode; className?: string }) {
   return <span className={`tabular-nums ${className}`}>{children}</span>;
+}
+
+/**
+ * The venue's mark: a black 8 ball with a cream spot on an orange disc, as on the sign.
+ * Decorative; the name next to it carries the meaning.
+ */
+export function BrandMark({ size = 32 }: { size?: number }) {
+  return (
+    <svg aria-hidden width={size} height={size} viewBox="0 0 64 64" className="shrink-0">
+      <circle cx="32" cy="32" r="32" fill="#f47b20" />
+      <circle cx="32" cy="32" r="23" fill="#0a0a0a" stroke="#f6e7d2" strokeWidth="2.5" />
+      <circle cx="32" cy="32" r="11.5" fill="#f6e7d2" />
+      <text x="32" y="38.5" textAnchor="middle" fontSize="18" fontWeight="800" fill="#0a0a0a" fontFamily="system-ui, sans-serif">
+        8
+      </text>
+    </svg>
+  );
 }

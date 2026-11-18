@@ -683,7 +683,7 @@ function TerminalPanel({
         <Button size="lg" disabled={pending || cancelling} onClick={onResend}>
           Resend
         </Button>
-        <Button size="lg" variant="brass" disabled={pending} onClick={onMarkPaid}>
+        <Button size="lg" variant="accent" disabled={pending} onClick={onMarkPaid}>
           Mark paid – card
         </Button>
       </div>
@@ -774,7 +774,7 @@ function CardConfirmDialog({
       <label className="flex min-h-14 items-center gap-3 rounded-xl border border-line bg-bg px-4 text-lg">
         <input
           type="checkbox"
-          className="size-7 accent-[#2c7a55]"
+          className="size-7 accent-[#f47b20]"
           checked={checked}
           onChange={(e) => setChecked(e.target.checked)}
         />

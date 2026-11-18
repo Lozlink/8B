@@ -111,7 +111,7 @@ export function TableCard({ table, session, pricing, nowMs, busy, actions }: Pro
             Start
           </Button>
         ) : status === "awaiting_payment" ? (
-          <Button variant="brass" size="lg" full disabled={busy} onClick={() => actions.charge(session)}>
+          <Button variant="accent" size="lg" full disabled={busy} onClick={() => actions.charge(session)}>
             Charge
           </Button>
         ) : (

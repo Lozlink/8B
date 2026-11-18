@@ -3,9 +3,9 @@
 export default function GlobalError() {
   return (
     <html lang="en-AU">
-      <body style={{ background: "#0b100e", color: "#ecf1ec", fontFamily: "system-ui, sans-serif", padding: "4rem 1.5rem", textAlign: "center" }}>
+      <body style={{ background: "#0a0a0a", color: "#f4f1ec", fontFamily: "system-ui, sans-serif", padding: "4rem 1.5rem", textAlign: "center" }}>
         <h1 style={{ fontSize: "1.75rem" }}>Something went wrong</h1>
-        <p style={{ color: "#a3b5aa", fontSize: "1.1rem" }}>Reload to carry on. If it keeps happening, write start times on the paper sheet.</p>
+        <p style={{ color: "#aaa49c", fontSize: "1.1rem" }}>Reload to carry on. If it keeps happening, write start times on the paper sheet.</p>
         <button
           type="button"
           onClick={() => window.location.reload()}

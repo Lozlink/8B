@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import type { ReactNode } from "react";
-import { Button } from "@/components/ui";
+import { BrandMark, Button } from "@/components/ui";
 import { api } from "@/lib/client/api";
 import { FloorProvider, useFloor } from "@/lib/client/floor-context";
 import { useAction } from "@/lib/client/use-action";
@@ -64,9 +64,7 @@ function Chrome({ children }: { children: ReactNode }) {
       <header className="sticky top-0 z-30 border-b border-line bg-bg/95 pt-[env(safe-area-inset-top)] backdrop-blur">
         <div className="flex flex-wrap items-center gap-x-4 gap-y-2 px-4 py-2">
           <div className="flex min-w-0 items-center gap-2">
-            <span aria-hidden className="text-2xl">
-              🎱
-            </span>
+            <BrandMark size={32} />
             <div className="min-w-0 leading-tight">
               <p className="truncate text-base font-bold">{me?.device.label ?? "…"}</p>
               <p className="truncate text-sm text-muted">{me ? me.staff.name : "Signing in…"}</p>
@@ -82,13 +80,13 @@ function Chrome({ children }: { children: ReactNode }) {
                   href={item.href}
                   aria-current={active ? "page" : undefined}
                   className={`relative flex min-h-12 flex-1 items-center justify-center gap-2 rounded-xl px-4 text-base font-semibold sm:flex-none ${
-                    active ? "bg-felt text-white" : "bg-surface-2 text-chalk active:bg-line"
+                    active ? "bg-brand text-on-brand" : "bg-surface-2 text-chalk active:bg-line"
                   }`}
                 >
                   {item.label}
                   {item.href === "/unpaid" && unpaidCount > 0 ? (
                     <span
-                      className="inline-flex min-w-7 items-center justify-center rounded-full bg-brass px-2 py-0.5 text-sm font-bold tabular-nums text-[#1a1305]"
+                      className="inline-flex min-w-7 items-center justify-center rounded-full bg-accent px-2 py-0.5 text-sm font-bold tabular-nums text-[#1a1305]"
                       aria-label={`${unpaidCount} unpaid`}
                     >
                       {unpaidCount}

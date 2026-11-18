@@ -150,6 +150,11 @@ export interface SquarePaymentDetail {
   /** Set on sales the app records itself (the session id). Square POS leaves it empty. */
   referenceId: string | null;
   createdAt: string | null;
+  /**
+   * Everything refunded on this payment so far, all refunds together (`refunded_money`; seen on the
+   * sandbox: 602 after refunds of 302 and 300). null when Square's answer doesn't carry it.
+   */
+  refundedCents: number | null;
 }
 
 interface SdkPayment {
@@ -157,6 +162,7 @@ interface SdkPayment {
   status?: string;
   sourceType?: string;
   amountMoney?: { amount?: bigint | null } | null;
+  refundedMoney?: { amount?: bigint | null } | null;
   locationId?: string;
   orderId?: string;
   note?: string;
@@ -178,6 +184,7 @@ function toDetail(p: SdkPayment | undefined, what: string): SquarePaymentDetail 
     note: p.note ?? null,
     referenceId: p.referenceId ?? null,
     createdAt: p.createdAt ?? null,
+    refundedCents: p.refundedMoney?.amount != null ? Number(p.refundedMoney.amount) : null,
   };
 }
 
@@ -185,8 +192,8 @@ function toDetail(p: SdkPayment | undefined, what: string): SquarePaymentDetail 
 const READ_OPTIONS = { timeoutInSeconds: 8, maxRetries: 0 } as const;
 const ON_READ_TIMEOUT = "Try again in a moment.";
 
-export async function getPayment(paymentId: string): Promise<SquarePaymentDetail> {
-  const what = "look up the cash sale";
+/** One 8 s try, no SDK retry. `what` finishes "Square couldn't …" if the read fails. */
+export async function getPayment(paymentId: string, what = "look up the cash sale"): Promise<SquarePaymentDetail> {
   try {
     const res = await square().payments.get({ paymentId }, READ_OPTIONS);
     return toDetail(res.payment, what);

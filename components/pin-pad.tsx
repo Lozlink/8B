@@ -21,7 +21,7 @@ export function PinDots({ value, maxLength = 6 }: { value: string; maxLength?: n
         <span
           key={i}
           aria-hidden
-          className={`size-4 rounded-full border-2 ${i < value.length ? "border-brass bg-brass" : "border-muted bg-transparent"}`}
+          className={`size-4 rounded-full border-2 ${i < value.length ? "border-accent bg-accent" : "border-muted bg-transparent"}`}
         />
       ))}
     </div>

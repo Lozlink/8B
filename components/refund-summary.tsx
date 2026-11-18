@@ -4,6 +4,7 @@ import type { ReactNode } from "react";
 import { ReceiptButton } from "@/components/receipt-button";
 import { RefundButton } from "@/components/paid-bill-actions";
 import { RefundDetails } from "@/components/refunds-list";
+import { SettleRefundButton } from "@/components/settle-refund-dialog";
 import { Button, Money, Notice } from "@/components/ui";
 import { hasPendingRefund, processingRefundCents, refundMethodLabel, takingsAfterRefunds } from "@/lib/client/refund-view";
 import { usePendingPoll } from "@/lib/client/use-pending-poll";
@@ -109,7 +110,10 @@ export function RefundsSummarySection({
                     </span>
                     {r.error ? <span className="mt-0.5 block break-words text-sm">{r.error}</span> : null}
                   </span>
-                  <Button onClick={() => onOpen(r.sessionId)}>Open bill</Button>
+                  <span className="flex shrink-0 flex-wrap gap-2">
+                    <SettleRefundButton sessionId={r.sessionId} label={r.label} refund={r} tz={tz} onChanged={reload} stale={stale} />
+                    <Button onClick={() => onOpen(r.sessionId)}>Open bill</Button>
+                  </span>
                 </li>
               ))}
             </ul>

@@ -27,6 +27,8 @@ import { squareStatus } from "./square-errors";
 export interface PaymentsGateway {
   refundPayment: typeof payments.refundPayment;
   getRefund: typeof payments.getRefund;
+  /** Reads a payment, for what Square says has been refunded on it (settling a refund by hand). */
+  getPayment: typeof payments.getPayment;
   /** Reads a Terminal checkout. Named as in the Terminal gateway, so one fake can serve both. */
   get: typeof terminal.getTerminalCheckout;
   createReceiptAction: typeof terminal.createReceiptAction;
@@ -35,6 +37,7 @@ export interface PaymentsGateway {
 let gateway: PaymentsGateway = {
   refundPayment: payments.refundPayment,
   getRefund: payments.getRefund,
+  getPayment: payments.getPayment,
   get: terminal.getTerminalCheckout,
   createReceiptAction: terminal.createReceiptAction,
 };

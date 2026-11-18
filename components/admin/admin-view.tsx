@@ -112,7 +112,7 @@ export function AdminView() {
             aria-controls="admin-panel"
             onClick={() => setTab(t.id)}
             className={`min-h-12 shrink-0 rounded-xl px-4 text-base font-semibold ${
-              tab === t.id ? "bg-felt text-white" : "bg-surface-2 text-chalk active:bg-line"
+              tab === t.id ? "bg-brand text-on-brand" : "bg-surface-2 text-chalk active:bg-line"
             }`}
           >
             {t.label}

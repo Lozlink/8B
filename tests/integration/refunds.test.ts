@@ -1,8 +1,35 @@
 import { createHmac, randomUUID } from "node:crypto";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { bootHarness, type Harness } from "./helpers/harness";
+import { bootHarness, MANAGER_PIN, STAFF_PIN, type Harness } from "./helpers/harness";
+
+// The settle-refund route reads the device and staff cookies; give it a jar to read. `handler`
+// waits on Next's connection(), and the refund route schedules work with after(): neither exists
+// outside a real request.
+const mocks = vi.hoisted(() => {
+  const store = new Map<string, string>();
+  return {
+    store,
+    jar: {
+      get: (name: string) => (store.has(name) ? { name, value: store.get(name) as string } : undefined),
+      has: (name: string) => store.has(name),
+      set: (name: string, value: string) => void store.set(name, value),
+      delete: (name: string) => void store.delete(name),
+    },
+  };
+});
+vi.mock("next/headers", () => ({
+  cookies: async () => mocks.jar,
+  headers: async () => ({ get: () => null }),
+}));
+vi.mock("next/server", async (original) => ({
+  ...(await original<typeof import("next/server")>()),
+  connection: async () => undefined,
+  after: () => undefined,
+}));
+
 import { squareRejection, squareServerError, squareTimeout } from "./helpers/fake-gateway";
 import { at, audits, awaitingPayment, getCheckouts, getSession } from "./helpers/util";
+import { hashPin, login, setDeviceCookie } from "@/lib/server/auth";
 import { withTx } from "@/lib/server/db";
 import { AppError } from "@/lib/server/errors";
 import { findPayment, resolvePayment } from "@/lib/server/payment-ref";
@@ -14,7 +41,9 @@ import {
   pushRefunds,
   refundSession,
   refundsInBackground,
+  settleRefund,
   type RefundRow,
+  type SettleOutcome,
 } from "@/lib/server/refunds";
 import {
   addCustomItem,
@@ -61,6 +90,7 @@ afterAll(async () => {
 beforeEach(async () => {
   await h.reset();
   await h.raw(null, `truncate realtime.sent, probe.writes`);
+  mocks.store.clear();
   vi.restoreAllMocks();
   vi.spyOn(console, "warn").mockImplementation(() => undefined);
 });
@@ -1319,5 +1349,539 @@ describe("RC. printing a receipt on the Terminal", () => {
     await printReceipt(h.staff.actor, id);
     expect(new Set((await writes()).map((w) => w.tbl))).toEqual(new Set(["audit_log"]));
     expect(await broadcasts()).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// D. A manager settles a refund nobody could confirm
+// ---------------------------------------------------------------------------
+
+const settle = (id: string, refundId: string, outcome: SettleOutcome, reason = "Checked the payment in Square Dashboard") =>
+  settleRefund(h.staff.actor, h.staff.manager, id, reason, refundId, outcome);
+
+/**
+ * Parks a refund of `cents` on a paid bill. `made`: whether Square really made it (its answer was
+ * lost and the re-send was refused) or never did (the key was already on file for something else).
+ */
+async function park(id: string, cents: number, made: boolean): Promise<string> {
+  if (made) {
+    h.gateway.refundError = squareTimeout();
+    h.gateway.refundFailAfterCreating = true;
+    await refund(id, cents);
+    h.gateway.refundFailAfterCreating = false;
+    h.gateway.refundError = squareRejection(400, "REFUND_AMOUNT_INVALID", "Square couldn't record the refund: nothing left to refund");
+    await makeDue();
+    await pushRefunds();
+  } else {
+    h.gateway.refundError = squareRejection(400, "IDEMPOTENCY_KEY_REUSED");
+    await refund(id, cents);
+  }
+  const rows = await refundRows(id);
+  const row = rows[rows.length - 1];
+  expect(row).toMatchObject({ state: "pending", parked: true, square_refund_id: null, amount_cents: cents });
+  return row.id;
+}
+
+const paymentReads = () => h.gateway.posReads.filter((r) => r.startsWith("payment:"));
+const settledAudits = (id: string) => audits(h, id, "refund.settled_by_manager");
+
+/** Everything a refusal must leave alone. */
+async function untouched(id: string, refundId: string, refunded: number): Promise<void> {
+  const row = (await refundRows(id)).find((r) => r.id === refundId);
+  expect(row).toMatchObject({ state: "pending", parked: true });
+  expect(await refundedCents(id)).toBe(refunded);
+  expect(await settledAudits(id)).toHaveLength(0);
+}
+
+describe("RD. needsCheck marks exactly the refunds the app has stopped trying", () => {
+  it("true for a parked refund, false for one in progress, done or refused; the same on the summary", async () => {
+    const a = await paidByCard("Table 1");
+    const parkedId = await park(a.id, 1500, false);
+
+    const b = await paidByCard("Table 2");
+    await refund(b.id, 300); // with Square, being processed
+    h.gateway.refundError = squareTimeout();
+    await refund(b.id, 200); // unanswered, will be sent again
+    h.gateway.refundError = squareRejection(400, "BAD_REQUEST");
+    await caught(refund(b.id, 100)); // refused
+    h.gateway.refundCreateStatus = "COMPLETED";
+    const done = await refund(b.id, 400);
+    expect(done.refund).toMatchObject({ state: "completed", needsCheck: false });
+
+    expect((await getSessionDetail(a.id)).refunds.map((r) => [r.id, r.needsCheck])).toEqual([[parkedId, true]]);
+    expect((await getSessionDetail(b.id)).refunds.map((r) => [r.state, r.needsCheck])).toEqual([
+      ["pending", false],
+      ["pending", false],
+      ["failed", false],
+      ["completed", false],
+    ]);
+    const summary = await getSummary(null);
+    expect(summary.refundsOutstanding.items.map((r) => [r.id, r.needsCheck])).toEqual([[parkedId, true]]);
+    expect(summary.refunds.items.filter((r) => r.needsCheck).map((r) => r.id)).toEqual([parkedId]);
+  });
+});
+
+describe("RD. the manager says the refund is in Square", () => {
+  it("it becomes completed, nothing else changes, and it leaves the outstanding list", async () => {
+    const { id } = await paidByCard();
+    const refundId = await park(id, 2500, true);
+    expect((await getSummary(null)).refundsOutstanding).toMatchObject({ count: 1, cents: 2500 });
+    h.gateway.posReads = [];
+    await h.raw(null, `truncate probe.writes, realtime.sent`);
+
+    const out = await settle(id, refundId, "refunded", "  Refund is on the payment in Square  ");
+    expect(out.refund).toMatchObject({ id: refundId, state: "completed", needsCheck: false, error: null, amountCents: 2500 });
+    expect(Object.keys(out.refund)).not.toContain("sessionId");
+
+    // The amount was counted all along. The bill itself is not written to: no floor broadcast.
+    expect(await refundedCents(id)).toBe(2500);
+    expect(new Set((await writes()).map((w) => w.tbl))).toEqual(new Set(["refunds", "audit_log"]));
+    expect(await broadcasts()).toBe(0);
+    // Nothing is asked of Square: the manager has looked, and no money changes.
+    expect(paymentReads()).toHaveLength(0);
+    expect((await refundRows(id))[0]).toMatchObject({ state: "completed", square_refund_id: null, claimed_at: null });
+
+    const [row] = await settledAudits(id);
+    expect(row).toMatchObject({
+      actor_staff_id: h.staff.actor.staffId,
+      approved_by_staff_id: h.staff.manager.id,
+      device_label: "Counter",
+      reason: "Refund is on the payment in Square",
+    });
+    expect(row.before).toMatchObject({ state: "pending", refunded_cents: 2500 });
+    expect(row.after).toMatchObject({ refund_id: refundId, outcome: "refunded", state: "completed", amount_cents: 2500, refunded_cents: 2500, square_check: null });
+    expect(await audits(h, id, "refund.failed")).toHaveLength(0);
+
+    const summary = await getSummary(null);
+    expect(summary.refundsOutstanding).toEqual({ count: 0, cents: 0, items: [] });
+    expect(summary.refunds).toMatchObject({ count: 1, cents: 2500 });
+    const detail = await getSessionDetail(id);
+    expect(detail.refunds[0]).toMatchObject({ state: "completed", needsCheck: false });
+    expect(detail.session).toMatchObject({ refundedCents: 2500, refundable: null });
+
+    // Money went back, so the bill still can't be reopened or refunded again, and nothing is re-sent.
+    await expect(reversePaid(h.staff.managerActor, h.staff.manager, id, "Try again")).rejects.toMatchObject({ status: 409 });
+    await expect(refund(id, 100)).rejects.toMatchObject({ status: 409 });
+    const sent = h.gateway.refunds.length;
+    await makeDue();
+    expect(await pushRefunds()).toBe(0);
+    expect(h.gateway.refunds).toHaveLength(sent);
+  });
+});
+
+describe("RD. the manager says the refund is not in Square", () => {
+  it("it fails, the amount comes back exactly once, and the bill can be refunded again", async () => {
+    const { id, paymentId } = await paidByCard();
+    const refundId = await park(id, 2500, false);
+    h.gateway.posReads = [];
+
+    const out = await settle(id, refundId, "not_refunded");
+    expect(out.refund).toMatchObject({
+      id: refundId,
+      state: "failed",
+      needsCheck: false,
+      error: "A manager checked Square: this refund was not made.",
+    });
+    expect(await refundedCents(id)).toBe(0);
+    expect((await refundRows(id))[0]).toMatchObject({
+      state: "failed",
+      square_refund_id: null,
+      last_error: "A manager checked Square: this refund was not made.",
+    });
+    // Square was asked once about this refund's own payment, and showed nothing refunded on it.
+    expect(paymentReads()).toEqual([`payment:${paymentId}`]);
+
+    const [row] = await settledAudits(id);
+    expect(row).toMatchObject({
+      actor_staff_id: h.staff.actor.staffId,
+      approved_by_staff_id: h.staff.manager.id,
+      reason: "Checked the payment in Square Dashboard",
+    });
+    expect(row.before).toMatchObject({ state: "pending", refunded_cents: 2500 });
+    expect(row.after).toMatchObject({
+      refund_id: refundId,
+      outcome: "not_refunded",
+      state: "failed",
+      refunded_cents: 0,
+      square_check: { checked: true, square_refunded_cents: 0, app_known_cents: 0 },
+    });
+
+    // A second go, by anyone, changes nothing: the amount came back once.
+    for (const again of ["not_refunded", "refunded"] as const) {
+      const e = await caught(settle(id, refundId, again));
+      expect(e).toMatchObject({ status: 409, code: "conflict", message: "This refund is already marked as not made. Nothing was changed." });
+    }
+    expect(await refundedCents(id)).toBe(0);
+    expect(await settledAudits(id)).toHaveLength(1);
+    expect((await refundRows(id))[0].state).toBe("failed");
+
+    const summary = await getSummary(null);
+    expect(summary.refundsOutstanding).toEqual({ count: 0, cents: 0, items: [] });
+    expect(summary.refunds).toMatchObject({ count: 0, cents: 0 });
+    expect((await getSessionDetail(id)).session).toMatchObject({ refundedCents: 0, refundable: { method: "card", maxCents: 2500 } });
+
+    // Refunding again is a new refund under the next key, and this time Square makes it.
+    h.gateway.refundCreateStatus = "COMPLETED";
+    const next = await refund(id, 2500);
+    expect(next.refund.state).toBe("completed");
+    expect(h.gateway.refunds[h.gateway.refunds.length - 1]).toMatchObject({ idempotencyKey: `${id}-rf2`, paymentId, amountCents: 2500 });
+    expect(await refundedCents(id)).toBe(2500);
+  });
+
+  it("with no other refund on it, the bill can be reopened again", async () => {
+    const { id } = await paidByCard();
+    const refundId = await park(id, 1000, false);
+    await expect(reversePaid(h.staff.managerActor, h.staff.manager, id, "Wrong bill")).rejects.toMatchObject({ status: 409 });
+    await settle(id, refundId, "not_refunded");
+    await reversePaid(h.staff.managerActor, h.staff.manager, id, "Wrong bill");
+    expect(await getSession(h, id)).toMatchObject({ status: "awaiting_payment", refunded_cents: 0 });
+  });
+
+  it("only its own amount comes back: an earlier refund still counts and still blocks reopening", async () => {
+    const { id } = await paidByCard();
+    h.gateway.refundCreateStatus = "COMPLETED";
+    await refund(id, 500);
+    const refundId = await park(id, 1000, false);
+    expect(await refundedCents(id)).toBe(1500);
+
+    await settle(id, refundId, "not_refunded");
+    expect(await refundedCents(id)).toBe(500);
+    expect((await settledAudits(id))[0].after).toMatchObject({
+      refunded_cents: 500,
+      square_check: { checked: true, square_refunded_cents: 500, app_known_cents: 500 },
+    });
+    expect((await getSessionDetail(id)).session).toMatchObject({ refundedCents: 500, refundable: { method: "card", maxCents: 2000 } });
+    await expect(reversePaid(h.staff.managerActor, h.staff.manager, id, "Wrong bill")).rejects.toMatchObject({ status: 409 });
+  });
+
+  it("two answers at the same moment: one is taken, and the amount moves at most once", async () => {
+    const { id } = await paidByCard();
+    const refundId = await park(id, 1000, false);
+    const results = await Promise.allSettled([
+      settle(id, refundId, "not_refunded"),
+      settle(id, refundId, "not_refunded"),
+      settle(id, refundId, "refunded"),
+    ]);
+    expect(results.filter((r) => r.status === "fulfilled")).toHaveLength(1);
+    for (const r of results) {
+      if (r.status === "rejected") expect(r.reason).toMatchObject({ status: 409, code: "conflict" });
+    }
+    const [row] = await refundRows(id);
+    expect(await refundedCents(id)).toBe(row.state === "failed" ? 0 : 1000);
+    expect(await settledAudits(id)).toHaveLength(1);
+  });
+
+  it("settled by someone else while Square was being read: refused under the lock, nothing moves", async () => {
+    const { id } = await paidByCard();
+    const refundId = await park(id, 1000, false);
+    const read = h.gateway.getPayment;
+    vi.spyOn(h.gateway, "getPayment").mockImplementationOnce(async (paymentId) => {
+      await settle(id, refundId, "refunded");
+      return read(paymentId);
+    });
+    const e = await caught(settle(id, refundId, "not_refunded"));
+    expect(e).toMatchObject({ status: 409, code: "conflict", message: "This refund is already marked as refunded. Nothing was changed." });
+    expect((await refundRows(id))[0].state).toBe("completed");
+    expect(await refundedCents(id)).toBe(1000);
+    expect(await settledAudits(id)).toHaveLength(1);
+  });
+});
+
+describe("RD. Square is asked before a refund is marked as not made", () => {
+  it("Square shows the refund: refused, nothing written; the manager can still say it was made", async () => {
+    const { id } = await paidByCard();
+    const refundId = await park(id, 2500, true);
+    await h.raw(null, `truncate probe.writes, realtime.sent`);
+
+    const e = await caught(settle(id, refundId, "not_refunded"));
+    expect(e).toMatchObject({
+      status: 409,
+      code: "square_shows_refund",
+      message: "Square shows $25.00 refunded on this payment, which is more than the app knows about. This refund looks like it did go through.",
+    });
+    expect(await writes()).toEqual([]);
+    await untouched(id, refundId, 2500);
+    expect((await getSummary(null)).refundsOutstanding.count).toBe(1);
+
+    await settle(id, refundId, "refunded");
+    expect((await refundRows(id))[0].state).toBe("completed");
+    expect(await refundedCents(id)).toBe(2500);
+  });
+
+  it("refunds the app knows went back are not mistaken for this one; a refund made in Square Dashboard is", async () => {
+    const { id, paymentId } = await paidByCard();
+    h.gateway.refundCreateStatus = "COMPLETED";
+    await refund(id, 500); // completed
+    h.gateway.refundCreateStatus = "PENDING";
+    h.gateway.refundSettlesAs = "PENDING";
+    await refund(id, 300); // Square has it (an id), still processing
+    const refundId = await park(id, 1000, false);
+    expect(h.gateway.payments.get(paymentId)?.refundedCents).toBe(800);
+
+    // Someone refunded $2.00 in Square Dashboard: more than the app can account for.
+    h.gateway.refundedElsewhere(paymentId, 200);
+    const e = await caught(settle(id, refundId, "not_refunded"));
+    expect(e).toMatchObject({ status: 409, code: "square_shows_refund" });
+    expect(e.message).toMatch(/^Square shows \$10\.00 refunded on this payment/);
+    await untouched(id, refundId, 1800);
+
+    // Without it, Square's $8.00 is exactly what the app knows about.
+    h.gateway.refundedElsewhere(paymentId, -200);
+    await settle(id, refundId, "not_refunded");
+    expect(await refundedCents(id)).toBe(800);
+    expect((await settledAudits(id))[0].after).toMatchObject({
+      square_check: { checked: true, square_refunded_cents: 800, app_known_cents: 800 },
+    });
+  });
+
+  it("two parked refunds on one payment: saying which one went through clears the way for the other", async () => {
+    const { id } = await paidByCard();
+    const made = await park(id, 500, true);
+    const notMade = await park(id, 300, false);
+
+    // Square shows $5.00 and the app can't yet say which refund that is.
+    await expect(settle(id, notMade, "not_refunded")).rejects.toMatchObject({ status: 409, code: "square_shows_refund" });
+    await settle(id, made, "refunded");
+    await settle(id, notMade, "not_refunded");
+    expect((await refundRows(id)).map((r) => r.state)).toEqual(["completed", "failed"]);
+    expect(await refundedCents(id)).toBe(500);
+    expect((await getSummary(null)).refundsOutstanding.count).toBe(0);
+  });
+
+  it("Square can't be read: the manager's word stands, and the audit row says Square wasn't checked", async () => {
+    const { id } = await paidByCard();
+    const refundId = await park(id, 2500, true); // Square does hold it, but nobody can see that now
+    h.gateway.posError = squareTimeout();
+
+    const out = await settle(id, refundId, "not_refunded");
+    expect(out.refund).toMatchObject({ state: "failed", needsCheck: false });
+    expect(await refundedCents(id)).toBe(0);
+    const [row] = await settledAudits(id);
+    expect(row.after).toMatchObject({ outcome: "not_refunded", state: "failed" });
+    const check = (row.after as { square_check: { checked: boolean; why: string } }).square_check;
+    expect(check.checked).toBe(false);
+    expect(check.why).toMatch(/didn't answer in time/);
+  });
+
+  it("Square's answer has no refunded total: the same, and the audit row says so", async () => {
+    const { id } = await paidByCard();
+    const refundId = await park(id, 2500, false);
+    h.gateway.hideRefundedTotal = true;
+    await settle(id, refundId, "not_refunded");
+    expect(await refundedCents(id)).toBe(0);
+    expect((await settledAudits(id))[0].after).toMatchObject({
+      square_check: { checked: false, why: "Square's answer had no refunded total on it." },
+    });
+  });
+
+  it("a cash bill that was reopened and paid again: only the payment this refund is against is looked at", async () => {
+    const id = await paidByCash(); // pay_1
+    h.gateway.refundError = squareRejection(400, "BAD_REQUEST");
+    await caught(refund(id, 500)); // refused: failed, so the bill can be reopened
+    await reversePaid(h.staff.managerActor, h.staff.manager, id, "Wrong amount taken");
+    await pushCashRecords(); // the outbox refunds the whole first sale in Square
+    expect(h.gateway.payments.get("pay_1")?.refundedCents).toBe(2500);
+    await markPaid(h.staff.actor, id, "cash", { cardConfirmed: false }, new Date());
+    await pushCashRecords(); // pay_2
+    expect(await resolvePayment(id)).toEqual({ paymentId: "pay_2", method: "cash", amountCents: 2500 });
+
+    const refundId = await park(id, 500, false);
+    expect((await refundRows(id)).map((r) => r.square_payment_id)).toEqual(["pay_1", "pay_2"]);
+    h.gateway.posReads = [];
+
+    // The $25.00 the outbox refunded on pay_1 has nothing to do with this refund of pay_2.
+    await settle(id, refundId, "not_refunded");
+    expect(paymentReads()).toEqual(["payment:pay_2"]);
+    expect(await refundedCents(id)).toBe(0);
+    expect((await settledAudits(id))[0].after).toMatchObject({
+      square_payment_id: "pay_2",
+      square_check: { checked: true, square_refunded_cents: 0, app_known_cents: 0 },
+    });
+  });
+
+  it("refunds of an earlier payment of the same bill are not counted as known on this one", async () => {
+    const id = await paidByCash(); // pay_1
+    h.gateway.refundError = squareRejection(400, "BAD_REQUEST");
+    await caught(refund(id, 500));
+    await reversePaid(h.staff.managerActor, h.staff.manager, id, "Wrong amount taken");
+    await pushCashRecords();
+    await markPaid(h.staff.actor, id, "cash", { cardConfirmed: false }, new Date());
+    await pushCashRecords(); // pay_2
+    const refundId = await park(id, 500, true); // Square made it, on pay_2
+    // Stand-in for history the app's own rules don't produce today: the earlier refund, against
+    // pay_1, held as completed. It must not be set against what Square shows on pay_2.
+    await h.raw(null, `update public.refunds set state = 'completed' where session_id = '${id}' and seq = 1`);
+
+    const e = await caught(settle(id, refundId, "not_refunded"));
+    expect(e).toMatchObject({ status: 409, code: "square_shows_refund" });
+    expect(e.message).toMatch(/^Square shows \$5\.00 refunded/);
+    expect((await refundRows(id))[1]).toMatchObject({ state: "pending", parked: true });
+  });
+});
+
+describe("RD. what a manager can't settle", () => {
+  const refusal = async (id: string, refundId: string, message: RegExp | string, refunded: number) => {
+    h.gateway.posReads = [];
+    await h.raw(null, `truncate probe.writes`);
+    for (const outcome of ["refunded", "not_refunded"] as const) {
+      const e = await caught(settle(id, refundId, outcome));
+      expect(e).toMatchObject({ status: 409, code: "conflict" });
+      if (typeof message === "string") expect(e.message).toBe(message);
+      else expect(e.message).toMatch(message);
+    }
+    // Nothing written, and Square isn't even asked.
+    expect(await writes()).toEqual([]);
+    expect(paymentReads()).toHaveLength(0);
+    expect(await refundedCents(id)).toBe(refunded);
+    expect(await settledAudits(id)).toHaveLength(0);
+  };
+
+  it("a refund the app is still trying", async () => {
+    const { id } = await paidByCard();
+    h.gateway.refundError = squareTimeout();
+    const out = await refund(id, 1000);
+    expect(out.refund).toMatchObject({ state: "pending", needsCheck: false });
+    await refusal(id, out.refund.id, "The app is still trying this refund with Square. Wait until it stops, then check again.", 1000);
+    expect((await refundRows(id))[0]).toMatchObject({ state: "pending", parked: false });
+  });
+
+  it("a refund Square holds as PENDING (it has an id)", async () => {
+    const { id } = await paidByCard();
+    const out = await refund(id, 1000);
+    expect((await refundRows(id))[0]).toMatchObject({ state: "pending", square_refund_id: "ref_1" });
+    await refusal(id, out.refund.id, "Square has this refund and is still processing it. The app will finish it on its own.", 1000);
+    expect((await refundRows(id))[0]).toMatchObject({ state: "pending", square_refund_id: "ref_1" });
+  });
+
+  it("a parked row that somehow carries a Square refund id is Square's to finish, not a manager's", async () => {
+    const { id } = await paidByCard();
+    const refundId = await park(id, 1000, false);
+    await h.raw(null, `update public.refunds set square_refund_id = 'ref_x' where id = '${refundId}'`);
+    await refusal(id, refundId, /Square has this refund/, 1000);
+  });
+
+  it("a completed refund", async () => {
+    const { id } = await paidByCard();
+    h.gateway.refundCreateStatus = "COMPLETED";
+    const out = await refund(id, 1000);
+    await refusal(id, out.refund.id, "This refund is already marked as refunded. Nothing was changed.", 1000);
+    expect((await refundRows(id))[0].state).toBe("completed");
+  });
+
+  it("a failed refund", async () => {
+    const { id } = await paidByCard();
+    h.gateway.refundError = squareRejection(400, "BAD_REQUEST");
+    await caught(refund(id, 1000));
+    const [row] = await refundRows(id);
+    await refusal(id, row.id, "This refund is already marked as not made. Nothing was changed.", 0);
+    expect((await refundRows(id))[0].state).toBe("failed");
+  });
+
+  it("a refund of another bill, an unknown refund, a malformed id; an unknown bill is a 404", async () => {
+    const a = await paidByCard("Table 1");
+    const parkedOnA = await park(a.id, 1000, false);
+    const b = await paidByCard("Table 2");
+
+    const notHere = "That refund isn't on this bill. Nothing was changed.";
+    await refusal(b.id, parkedOnA, notHere, 0);
+    await refusal(a.id, randomUUID(), notHere, 1000);
+    await refusal(a.id, "not-an-id", notHere, 1000);
+    await untouched(a.id, parkedOnA, 1000);
+
+    await expect(settle(randomUUID(), parkedOnA, "refunded")).rejects.toMatchObject({ status: 404 });
+    await expect(settle("nope", parkedOnA, "not_refunded")).rejects.toMatchObject({ status: 404 });
+    await untouched(a.id, parkedOnA, 1000);
+  });
+
+  it("without a written reason, or with an outcome that is neither: 400, nothing written", async () => {
+    const { id } = await paidByCard();
+    const refundId = await park(id, 1000, false);
+    await expect(settle(id, refundId, "refunded", "  ")).rejects.toMatchObject({ status: 400, message: "A reason is required." });
+    await expect(settle(id, refundId, "not_refunded", "ok")).rejects.toMatchObject({ status: 400 });
+    await expect(settle(id, refundId, "refunded", "x".repeat(501))).rejects.toMatchObject({ status: 400 });
+    await expect(settle(id, refundId, "maybe" as SettleOutcome)).rejects.toMatchObject({ status: 400 });
+    await untouched(id, refundId, 1000);
+  });
+});
+
+describe("RD. POST /api/sessions/[id]/settle-refund", () => {
+  interface Answer {
+    status: number;
+    body: { refund?: Record<string, unknown>; error?: { code: string; message: string } };
+  }
+  async function post(id: string, body: unknown): Promise<Answer> {
+    const { POST } = await import("@/app/api/sessions/[id]/[action]/route");
+    const res = await POST(
+      new Request(`https://example.test/api/sessions/${id}/settle-refund`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      }),
+      { params: Promise.resolve({ id, action: "settle-refund" }) },
+    );
+    return { status: res.status, body: (await res.json()) as Answer["body"] };
+  }
+  /** Enrols this "iPad" and logs the plain staff member in on it. */
+  async function signIn(): Promise<void> {
+    await h.sql`update public.staff set pin_hash = ${await hashPin(STAFF_PIN)} where id = ${h.staff.actor.staffId}`;
+    await h.sql`update public.staff set pin_hash = ${await hashPin(MANAGER_PIN)} where id = ${h.staff.manager.id}`;
+    const [d] = await h.sql<{ id: string; label: string }[]>`insert into public.devices (label) values ('Counter') returning id, label`;
+    await setDeviceCookie(d.id, d.label);
+    await login(h.staff.actor.staffId, STAFF_PIN);
+  }
+
+  it("needs a logged-in member of staff, a manager's PIN and a written reason; then settles", async () => {
+    const { id } = await paidByCard();
+    const refundId = await park(id, 1000, false);
+    const good = { managerPin: MANAGER_PIN, reason: "Not on the payment in Square", refundId, outcome: "not_refunded" };
+
+    expect((await post(id, good)).status).toBe(401);
+    await signIn();
+
+    // A staff PIN is not a manager's.
+    const wrongPin = await post(id, { ...good, managerPin: STAFF_PIN });
+    expect(wrongPin.status).toBe(403);
+    expect(wrongPin.body.error?.message).toBe("That isn't a manager PIN.");
+    expect((await post(id, { ...good, managerPin: "12" })).status).toBe(400);
+    expect((await post(id, { ...good, managerPin: undefined })).status).toBe(400);
+
+    expect((await post(id, { ...good, reason: undefined })).status).toBe(400);
+    expect((await post(id, { ...good, reason: "  " })).status).toBe(400);
+    expect((await post(id, { ...good, reason: "x".repeat(501) })).status).toBe(400);
+    expect((await post(id, { ...good, outcome: "maybe" })).status).toBe(400);
+    expect((await post(id, { ...good, outcome: undefined })).status).toBe(400);
+    expect((await post(id, { ...good, refundId: "nope" })).status).toBe(400);
+    expect((await post(id, { ...good, refundId: undefined })).status).toBe(400);
+    await untouched(id, refundId, 1000);
+
+    const done = await post(id, good);
+    expect(done.status).toBe(200);
+    expect(done.body.refund).toMatchObject({ id: refundId, state: "failed", needsCheck: false, error: "A manager checked Square: this refund was not made." });
+    expect(await refundedCents(id)).toBe(0);
+    const [row] = await settledAudits(id);
+    expect(row).toMatchObject({
+      actor_staff_id: h.staff.actor.staffId,
+      approved_by_staff_id: h.staff.manager.id,
+      reason: "Not on the payment in Square",
+    });
+
+    // The same request again is refused: 409, and nothing is written twice.
+    const again = await post(id, good);
+    expect(again.status).toBe(409);
+    expect(again.body.error).toMatchObject({ code: "conflict", message: "This refund is already marked as not made. Nothing was changed." });
+    expect(await settledAudits(id)).toHaveLength(1);
+  });
+
+  it("answers 409 `square_shows_refund` with the message when Square shows the refund", async () => {
+    const { id } = await paidByCard();
+    const refundId = await park(id, 1000, true);
+    await signIn();
+    const out = await post(id, { managerPin: MANAGER_PIN, reason: "Can't see it in Square", refundId, outcome: "not_refunded" });
+    expect(out.status).toBe(409);
+    expect(out.body.error).toMatchObject({
+      code: "square_shows_refund",
+      message: "Square shows $10.00 refunded on this payment, which is more than the app knows about. This refund looks like it did go through.",
+    });
+    await untouched(id, refundId, 1000);
   });
 });

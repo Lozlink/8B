@@ -1,16 +1,19 @@
 @import "tailwindcss";
 
-/* Low-glare palette for a dim lounge: felt green, chalk text, brass accents. */
+/* Low-glare palette for a dim lounge, in the venue's colours: orange on black, cream accents. */
 @theme inline {
-  --color-bg: #0b100e;
-  --color-surface: #141c18;
-  --color-surface-2: #1d2823;
-  --color-line: #2c3b34;
-  --color-chalk: #ecf1ec;
-  --color-muted: #a3b5aa;
-  --color-felt: #2c7a55;
-  --color-felt-dark: #226246;
-  --color-brass: #d9b15a;
+  /* 8 Ball Lounge: orange on black. Green, blue and amber are kept for table status only. */
+  --color-bg: #0a0a0a;
+  --color-surface: #151515;
+  --color-surface-2: #202020;
+  --color-line: #363636;
+  --color-chalk: #f4f1ec;
+  --color-muted: #aaa49c;
+  --color-brand: #f47b20;
+  --color-brand-dark: #d4640f;
+  --color-on-brand: #140a02;
+  --color-accent: #f6e7d2;
+  --color-success: #2f9265;
   --color-danger: #c4443b;
   --color-danger-text: #ff9d94;
   --color-warn: #f0b84d;
@@ -24,7 +27,7 @@
 }
 
 html {
-  background: #0b100e;
+  background: #0a0a0a;
   -webkit-text-size-adjust: 100%;
   text-size-adjust: 100%;
 }
@@ -58,7 +61,7 @@ textarea {
 }
 
 :focus-visible {
-  outline: 2px solid var(--color-brass);
+  outline: 2px solid var(--color-brand);
   outline-offset: 2px;
 }
 

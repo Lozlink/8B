@@ -1,5 +1,6 @@
 "use client";
 
+import type { ReactNode } from "react";
 import { Money } from "@/components/ui";
 import { refundMethodLabel, refundStateLabel, saysNothingRefunded } from "@/lib/client/refund-view";
 import type { RefundDTO } from "@/lib/domain/types";
@@ -54,13 +55,23 @@ export function RefundDetails({ refund, tz, label }: RowProps) {
 }
 
 /** The refunds on one bill, oldest first (the order the server sends them in). */
-export function RefundsList({ refunds, tz }: { refunds: readonly RefundDTO[]; tz: string }) {
+export function RefundsList({
+  refunds,
+  tz,
+  action,
+}: {
+  refunds: readonly RefundDTO[];
+  tz: string;
+  /** Something to show under a refund, like a button (null for none). */
+  action?: (refund: RefundDTO) => ReactNode;
+}) {
   if (refunds.length === 0) return null;
   return (
     <ul className="divide-y divide-line rounded-xl border border-line">
       {refunds.map((r) => (
         <li key={r.id} className="block px-4 py-3">
           <RefundDetails refund={r} tz={tz} />
+          {action ? <div className="mt-2 empty:hidden">{action(r)}</div> : null}
         </li>
       ))}
     </ul>

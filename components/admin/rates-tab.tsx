@@ -130,7 +130,7 @@ function RateDialog({
         </Field>
         {card ? (
           <label className="flex min-h-12 items-center gap-3 text-base">
-            <input type="checkbox" className="size-6 accent-[#2c7a55]" checked={active} onChange={(e) => setActive(e.target.checked)} />
+            <input type="checkbox" className="size-6 accent-[#f47b20]" checked={active} onChange={(e) => setActive(e.target.checked)} />
             Active
           </label>
         ) : null}

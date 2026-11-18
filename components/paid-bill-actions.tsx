@@ -4,6 +4,7 @@ import { useState } from "react";
 import { ReceiptButton } from "@/components/receipt-button";
 import { RefundDialog } from "@/components/refund-dialog";
 import { RefundsList } from "@/components/refunds-list";
+import { SettleRefundButton } from "@/components/settle-refund-dialog";
 import { Button, Money } from "@/components/ui";
 import { hasPendingRefund, noRefundNote, processingRefundCents } from "@/lib/client/refund-view";
 import { usePendingPoll } from "@/lib/client/use-pending-poll";
@@ -92,9 +93,12 @@ export function RefundsSection({
   detail,
   tz,
   reload,
+  stale = false,
 }: {
   detail: SessionDetailDTO;
   tz: string;
+  /** The bill couldn't refresh, so "I checked Square" is off until it does. */
+  stale?: boolean;
   /** Looks at the bill again. Called every few seconds while a refund is still processing (no broadcast tells us it finished). */
   reload: () => Promise<void>;
 }) {
@@ -127,7 +131,13 @@ export function RefundsSection({
           ) : null}
         </div>
       ) : null}
-      <RefundsList refunds={refunds} tz={tz} />
+      <RefundsList
+        refunds={refunds}
+        tz={tz}
+        action={(r) => (
+          <SettleRefundButton sessionId={s.id} label={s.label} refund={r} tz={tz} onChanged={reload} stale={stale} />
+        )}
+      />
       {note ? <p className="text-sm text-muted">{note}</p> : null}
     </section>
   );

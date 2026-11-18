@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { PinDots, PinPad } from "@/components/pin-pad";
-import { Button, Notice, Spinner } from "@/components/ui";
+import { BrandMark, Button, Notice, Spinner } from "@/components/ui";
 import { api } from "@/lib/client/api";
 import { errorMessage } from "@/lib/client/errors";
 
@@ -62,10 +62,10 @@ export function LoginView() {
   return (
     <div className="flex w-full max-w-2xl flex-col items-center gap-6">
       <div className="text-center">
-        <p aria-hidden className="text-5xl">
-          🎱
-        </p>
-        <h1 className="mt-2 text-3xl font-bold">8 Ball Timer</h1>
+        <div className="flex justify-center">
+          <BrandMark size={72} />
+        </div>
+        <h1 className="mt-3 text-3xl font-bold">8 Ball Lounge</h1>
         <p className="mt-1 text-lg text-muted">{device ? device.label : " "}</p>
       </div>
 
@@ -98,7 +98,7 @@ export function LoginView() {
                     }}
                   >
                     <span className="text-xl">{s.name}</span>
-                    {s.role === "manager" ? <span className="text-sm font-medium text-brass">Manager</span> : null}
+                    {s.role === "manager" ? <span className="text-sm font-medium text-accent">Manager</span> : null}
                   </Button>
                 </li>
               ))}

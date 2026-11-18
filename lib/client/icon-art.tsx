@@ -1,6 +1,6 @@
 import { ImageResponse } from "next/og";
 
-/** Renders the app icon (an 8 ball on felt) at any square size. Shared by every icon route. */
+/** Renders the app icon (a black 8 ball with a cream spot on the venue's orange) at any square size. Shared by every icon route. */
 export function renderIcon(px: number): ImageResponse {
   const ball = Math.round(px * 0.7);
   const badge = Math.round(ball * 0.46);
@@ -13,7 +13,7 @@ export function renderIcon(px: number): ImageResponse {
           display: "flex",
           alignItems: "center",
           justifyContent: "center",
-          background: "#1d5a40",
+          background: "#f47b20",
         }}
       >
         <div
@@ -21,11 +21,11 @@ export function renderIcon(px: number): ImageResponse {
             width: ball,
             height: ball,
             borderRadius: ball,
-            background: "#0b0d0c",
+            background: "#0a0a0a",
             display: "flex",
             alignItems: "center",
             justifyContent: "center",
-            border: `${Math.max(2, Math.round(px * 0.02))}px solid #d9b15a`,
+            border: `${Math.max(2, Math.round(px * 0.02))}px solid #f6e7d2`,
           }}
         >
           <div
@@ -33,8 +33,8 @@ export function renderIcon(px: number): ImageResponse {
               width: badge,
               height: badge,
               borderRadius: badge,
-              background: "#f4f1e8",
-              color: "#0b0d0c",
+              background: "#f6e7d2",
+              color: "#0a0a0a",
               display: "flex",
               alignItems: "center",
               justifyContent: "center",

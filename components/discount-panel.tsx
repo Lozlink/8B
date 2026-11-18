@@ -388,7 +388,7 @@ function OtherDiscountDialog({
                 setValue("");
               }}
               className={`min-h-12 rounded-xl border px-4 text-base font-semibold transition-colors ${
-                kind === k ? "border-[#2f9265] bg-felt text-white" : "border-line bg-surface-2 text-chalk active:bg-line"
+                kind === k ? "border-brand bg-brand text-on-brand" : "border-line bg-surface-2 text-chalk active:bg-line"
               }`}
             >
               {k === "percent" ? "Percent" : "Dollar amount"}

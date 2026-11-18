@@ -192,6 +192,21 @@ const auditInfo = (row: RefundRow) => ({
  */
 const nextLookSql = (q: Db) => q`now() + least(greatest(now() - created_at, interval '4 seconds'), interval '15 minutes')`;
 
+/**
+ * Takes a refund's amount back off what the bill has had refunded, and returns the new total.
+ *
+ * The one place that does it. Call it only in the transaction that has just moved the row from
+ * `pending` to `failed` (an UPDATE guarded by `state = 'pending'` that returned the row), under the
+ * bill's lock: that guard is what makes the amount come back exactly once.
+ */
+async function giveBack(tx: Db, row: Pick<RefundRow, "session_id" | "amount_cents">): Promise<number | undefined> {
+  const [s] = await tx<{ refunded_cents: number }[]>`
+    update public.sessions set refunded_cents = greatest(refunded_cents - ${row.amount_cents}, 0)
+    where id = ${row.session_id}
+    returning refunded_cents`;
+  return s?.refunded_cents;
+}
+
 /** Square said no. The amount goes back on what the bill can be refunded, under the bill's lock. */
 async function fail(row: RefundRow, o: Extract<Outcome, { kind: "refused" }>, who: Who): Promise<void> {
   await withTx(async (tx) => {
@@ -206,16 +221,13 @@ async function fail(row: RefundRow, o: Extract<Outcome, { kind: "refused" }>, wh
       returning id`;
     // Already settled by another worker: the amount must come back exactly once.
     if (!done) return;
-    const [s] = await tx<{ refunded_cents: number }[]>`
-      update public.sessions set refunded_cents = greatest(refunded_cents - ${row.amount_cents}, 0)
-      where id = ${row.session_id}
-      returning refunded_cents`;
+    const refundedCents = await giveBack(tx, row);
     await audit(tx, {
       ...who,
       action: "refund.failed",
       entity: "session",
       entityId: row.session_id,
-      after: { ...auditInfo(row), square_refund_id: o.refundId, square_status: o.status, refunded_cents: s?.refunded_cents, square: o.square },
+      after: { ...auditInfo(row), square_refund_id: o.refundId, square_status: o.status, refunded_cents: refundedCents, square: o.square },
       reason: `The ${dollars(row.amount_cents)} ${row.method} refund didn't go through. ${o.message} Nothing was refunded.`,
     });
   });
@@ -247,11 +259,16 @@ async function stop(row: RefundRow, message: string, square: unknown): Promise<v
   });
 }
 
-/** A refund the app has stopped trying: `pending`, with no further try scheduled. Over alias `r`. */
+/**
+ * A refund the app has stopped trying ("parked"): `pending`, with no further try scheduled. Over
+ * alias `r`. The one definition of it: `stop` is what makes it true, the background pass never
+ * picks such a row up, `RefundDTO.needsCheck` and `SummaryDTO.refundsOutstanding` report it, and
+ * `settleRefund` is the only thing that ends it.
+ */
 const parkedSql = (q: Db) => q`r.state = 'pending' and r.next_attempt_at > now() + interval '50 years'`;
 
 const checkInSquare = (row: RefundRow) =>
-  `Look at the payment in Square: if the ${dollars(row.amount_cents)} refund isn't there, make it in Square. The app counts it as refunded either way.`;
+  `Look at the payment in Square, then say here whether the ${dollars(row.amount_cents)} refund was made. Until then the app counts it as refunded.`;
 
 /** Writes the outcome of one call to Square. Every write is guarded by `state = 'pending'`. */
 async function settle(row: RefundRow, o: Outcome, who: Who): Promise<void> {
@@ -563,6 +580,158 @@ export async function refundSession(
 }
 
 // ---------------------------------------------------------------------------
+// A manager says what happened to a refund nobody could confirm
+// ---------------------------------------------------------------------------
+
+export type SettleOutcome = "refunded" | "not_refunded";
+
+const NOT_MADE = "A manager checked Square: this refund was not made.";
+
+interface SettleRow extends RefundRow {
+  parked: boolean;
+}
+
+const readForSettle = (q: Db, refundId: string) => q<SettleRow[]>`
+  select ${columns(q)}, (${parkedSql(q)}) as parked from public.refunds r where r.id = ${refundId}`;
+
+/** Why a manager can't settle this refund as it stands, or null when they can. */
+function cantSettle(r: SettleRow | undefined, sessionId: string): AppError | null {
+  if (!r || r.session_id !== sessionId) return conflict("That refund isn't on this bill. Nothing was changed.");
+  if (r.state === "completed") return conflict("This refund is already marked as refunded. Nothing was changed.");
+  if (r.state === "failed") return conflict("This refund is already marked as not made. Nothing was changed.");
+  if (r.square_refund_id !== null) {
+    return conflict("Square has this refund and is still processing it. The app will finish it on its own.");
+  }
+  if (!r.parked) return conflict("The app is still trying this refund with Square. Wait until it stops, then check again.");
+  return null;
+}
+
+/** What the look at Square before a "not refunded" found. Kept on the audit row. */
+type SquareCheck =
+  | { checked: true; square_refunded_cents: number; app_known_cents: number }
+  | { checked: false; why: string };
+
+/**
+ * What Square says has been refunded on the refund's payment, next to what the app knows went back
+ * on it. Never throws: a read that fails, or an answer with no refunded total, is "couldn't check".
+ */
+async function checkSquare(row: RefundRow, knownCents: number): Promise<SquareCheck> {
+  try {
+    const payment = await paymentsGateway().getPayment(row.square_payment_id, "look at the payment");
+    if (payment.refundedCents === null) return { checked: false, why: "Square's answer had no refunded total on it." };
+    return { checked: true, square_refunded_cents: payment.refundedCents, app_known_cents: knownCents };
+  } catch (e) {
+    if (!(e instanceof AppError)) {
+      console.warn("[square] payment read failed unexpectedly", row.id, e instanceof Error ? e.message : e);
+    }
+    return { checked: false, why: e instanceof AppError ? sentence(e.message) : "Something went wrong while reading the payment from Square." };
+  }
+}
+
+/**
+ * A manager has looked at the payment in Square Dashboard and says what happened to a refund the
+ * app stopped trying (`RefundDTO.needsCheck`). The app never decides this itself. The manager's PIN
+ * has been checked by the caller.
+ *
+ *   refunded     → `completed`. Nothing else changes: the amount was counted all along.
+ *   not_refunded → `failed`, and the amount comes back off what the bill has had refunded, so it
+ *                  can be refunded again (or the bill reopened).
+ *
+ * Only a parked refund of this bill that Square has never given a refund id can be settled;
+ * anything else is a 409 and nothing is written. The change is one guarded statement under the
+ * bill's lock, so it can't be applied twice or cross a background pass or another refund.
+ *
+ * Before a "not refunded", with no lock held, the payment is read from Square once. If Square shows
+ * more refunded on it than the app knows went back, the refund probably did go through: 409
+ * `square_shows_refund`, nothing written. If Square can't be read the manager's word stands, and
+ * the audit row says Square couldn't be checked.
+ */
+export async function settleRefund(
+  actor: Actor,
+  manager: Manager,
+  id: string,
+  reasonIn: string,
+  refundId: string,
+  outcome: SettleOutcome,
+): Promise<{ refund: RefundDTO }> {
+  const reason = requireReason(reasonIn);
+  if (outcome !== "refunded" && outcome !== "not_refunded") throw badRequest("Say whether the refund was made or not.");
+  if (!UUID_RE.test(id)) throw notFound("Session not found.");
+  const q = db();
+  const [bill] = await q<{ id: string }[]>`select id from public.sessions where id = ${id}`;
+  if (!bill) throw notFound("Session not found.");
+
+  // A first look with no lock held: it saves a call to Square for a refund that can't be settled
+  // anyway, and says which payment to read. The statement under the lock is what decides.
+  const before = UUID_RE.test(refundId) ? (await readForSettle(q, refundId))[0] : undefined;
+  const refusal = cantSettle(before, id);
+  if (refusal || !before) throw refusal ?? conflict("That refund isn't on this bill. Nothing was changed.");
+
+  let check: SquareCheck | null = null;
+  if (outcome === "not_refunded") {
+    // What the app knows went back on this same payment: refunds it holds as done, and ones Square
+    // has given an id and is finishing. Only this row's payment counts: a bill that was reopened
+    // and paid again has another payment, with its own refunds, that says nothing about this one.
+    // Added up BEFORE Square is read, so a refund that lands in between can only make Square's
+    // total look too big (a refusal the manager can retry), never too small.
+    const [known] = await q<{ cents: number }[]>`
+      select coalesce(sum(r.amount_cents), 0)::int as cents
+      from public.refunds r
+      where r.session_id = ${id} and r.square_payment_id = ${before.square_payment_id}
+        and (r.state = 'completed' or (r.state = 'pending' and r.square_refund_id is not null))`;
+    check = await checkSquare(before, known?.cents ?? 0);
+    if (check.checked && check.square_refunded_cents > check.app_known_cents) {
+      throw new AppError(
+        409,
+        "square_shows_refund",
+        `Square shows ${dollars(check.square_refunded_cents)} refunded on this payment, which is more than the app knows about. This refund looks like it did go through.`,
+      );
+    }
+  }
+
+  return withTx(async (tx) => {
+    const s = await lockSession(tx, id);
+    if (!s) throw notFound("Session not found.");
+    const made = outcome === "refunded";
+    const [done] = await tx<RefundRow[]>`
+      update public.refunds as r set
+        state = ${made ? "completed" : "failed"}, claimed_at = null,
+        last_error = ${made ? tx`r.last_error` : tx`${NOT_MADE}`}
+      where r.id = ${before.id} and r.session_id = ${id} and ${parkedSql(tx)} and r.square_refund_id is null
+      returning ${columns(tx)}`;
+    if (!done) {
+      // It changed since the first look (settled by someone else, most likely). Say what it is now.
+      const [now] = await readForSettle(tx, before.id);
+      throw cantSettle(now, id) ?? conflict("This refund changed just now, so nothing was done. Look at it again.");
+    }
+    const refundedCents = made ? s.refunded_cents : await giveBack(tx, done);
+    await audit(tx, {
+      actorStaffId: actor.staffId,
+      approvedByStaffId: manager.id,
+      deviceLabel: actor.deviceLabel,
+      action: "refund.settled_by_manager",
+      entity: "session",
+      entityId: id,
+      before: { state: "pending", refunded_cents: s.refunded_cents, last_error: before.last_error },
+      after: {
+        ...auditInfo(done),
+        outcome,
+        state: done.state,
+        refunded_cents: refundedCents,
+        // null: not asked (a "refunded" changes no money, so there is nothing to guard).
+        square_check: check,
+      },
+      reason,
+    });
+    const [stands] = await loadRefunds(tx, tx`r.id = ${done.id}`);
+    if (!stands) throw new Error(`refund ${done.id} vanished`);
+    const { sessionId: _sessionId, ...refund } = stands;
+    void _sessionId;
+    return { refund };
+  });
+}
+
+// ---------------------------------------------------------------------------
 // The background pass
 // ---------------------------------------------------------------------------
 
@@ -636,6 +805,8 @@ export async function refundsInBackground(): Promise<void> {
 // ---------------------------------------------------------------------------
 
 interface RefundJoinRow extends RefundRow {
+  /** `parkedSql`, as the database sees it now. */
+  parked: boolean;
   by_name: string;
   approved_by_name: string;
 }
@@ -649,6 +820,7 @@ function refundDTO(r: RefundJoinRow): RefundDTO {
     state: r.state,
     // Once Square has done it, an earlier "didn't answer in time" is history.
     error: r.state === "completed" ? null : r.last_error,
+    needsCheck: r.parked,
     createdAt: r.created_at.toISOString(),
     byName: r.by_name,
     approvedByName: r.approved_by_name,
@@ -660,7 +832,7 @@ type RefundWithSession = RefundDTO & { sessionId: string };
 /** Refunds matching `where` (a fragment over alias `r`), oldest first. */
 async function loadRefunds(q: Db, where: postgres.Fragment): Promise<RefundWithSession[]> {
   const rows = await q<RefundJoinRow[]>`
-    select ${columns(q)}, cb.name as by_name, ab.name as approved_by_name
+    select ${columns(q)}, (${parkedSql(q)}) as parked, cb.name as by_name, ab.name as approved_by_name
     from public.refunds r
     join public.staff cb on cb.id = r.created_by
     join public.staff ab on ab.id = r.approved_by

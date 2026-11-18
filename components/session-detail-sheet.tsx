@@ -177,7 +177,7 @@ export function SessionDetailSheet({ sessionId, onClose, onCharge }: Props) {
 
           <Breakdown detail={detail} nowMs={nowMs} />
 
-          <RefundsSection detail={detail} tz={tz} reload={load} />
+          <RefundsSection detail={detail} tz={tz} reload={load} stale={error !== null} />
 
           {detail.removedItems.length > 0 ? (
             <Section title="Removed items">
@@ -241,7 +241,7 @@ export function SessionDetailSheet({ sessionId, onClose, onCharge }: Props) {
 
           <div className="flex flex-col gap-3 border-t border-line pt-4">
             {s.status === "awaiting_payment" && onCharge ? (
-              <Button variant="brass" size="lg" onClick={onCharge}>
+              <Button variant="accent" size="lg" onClick={onCharge}>
                 Charge
               </Button>
             ) : null}

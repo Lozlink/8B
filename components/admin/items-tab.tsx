@@ -177,7 +177,7 @@ export function ItemsTab({ state, reload, onError }: TabProps) {
           aria-labelledby="itemise-label"
           onClick={() => setSwitching(true)}
           className={`flex h-12 w-20 shrink-0 items-center rounded-full border px-1 transition-colors ${
-            on ? "justify-end border-[#2f9265] bg-felt" : "justify-start border-line bg-surface-2"
+            on ? "justify-end border-brand bg-brand" : "justify-start border-line bg-surface-2"
           }`}
         >
           <span aria-hidden className="size-9 rounded-full bg-white shadow" />

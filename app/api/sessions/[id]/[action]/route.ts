@@ -29,7 +29,7 @@ import {
 import { checkCashHandoff, markPaidCheckingPos, startCashHandoff } from "@/lib/server/pos-cash";
 import { pushCashInBackground } from "@/lib/server/square-cash";
 import { printReceipt } from "@/lib/server/receipts";
-import { refundSession, refundsInBackground } from "@/lib/server/refunds";
+import { refundSession, refundsInBackground, settleRefund } from "@/lib/server/refunds";
 
 // A resend can make three Square calls in a row under the bill's lock (cancel, order, checkout).
 // Each has its own timeout; 60 s leaves room for all three to run slow and still answer.
@@ -71,6 +71,7 @@ const refundBody = managerAction.extend({
   // Optional only so a screen loaded before this existed still works; it then gets no protection.
   requestId: uuid.optional(),
 });
+const settleRefundBody = managerAction.extend({ refundId: uuid, outcome: z.enum(["refunded", "not_refunded"]) });
 
 const OK = { ok: true as const };
 
@@ -195,6 +196,13 @@ export const POST = handler(async (req: Request, ctx: RouteContext<"/api/session
       // Waits for Square's first answer. Throws 409 `refund_failed` if Square refused it. A repeat
       // of a request id that already made its refund answers with that refund and makes nothing new.
       return ok(await refundSession(actor, manager, id, b.reason, b.amountCents, b.requestId ?? null));
+    }
+    case "settle-refund": {
+      // A manager says what Square shows for a refund the app stopped trying. "not_refunded" reads
+      // the payment from Square once (8 s) before anything is written; 409 if it can't be settled.
+      const b = await readJson(req, settleRefundBody);
+      const manager = await verifyManagerPin(actor, b.managerPin);
+      return ok(await settleRefund(actor, manager, id, b.reason, b.refundId, b.outcome));
     }
     case "print-receipt":
       return ok(await printReceipt(actor, id));

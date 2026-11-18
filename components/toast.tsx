@@ -22,7 +22,7 @@ export function useToast(): ToastApi {
 
 const KIND_CLASS: Record<ToastKind, string> = {
   info: "border-line bg-surface-2 text-chalk",
-  success: "border-felt bg-[#16382a] text-chalk",
+  success: "border-success bg-[#16382a] text-chalk",
   error: "border-danger bg-[#3a1815] text-chalk",
 };
 

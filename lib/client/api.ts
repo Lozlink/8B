@@ -260,6 +260,22 @@ export const api = {
    */
   refund: (id: string, managerPin: string, reason: string, amountCents: number, requestId: string) =>
     post<{ refund: RefundDTO }>(`/api/sessions/${enc(id)}/refund`, { managerPin, reason, amountCents, requestId }),
+  /**
+   * A manager who has looked at the payment in Square Dashboard says what happened to a refund the
+   * app stopped trying (RefundDTO.needsCheck). `id` is the bill, `refundId` the refund on it.
+   *   "refunded"     — it is in Square: the refund becomes `completed`; the bill's money is unchanged.
+   *   "not_refunded" — it is not in Square: the refund becomes `failed` and its amount can be
+   *                    refunded again. The server reads the payment from Square first (up to 8 s).
+   * Answers with the refund as it now stands (needsCheck false). Refetch the bill and the summary
+   * afterwards. Any 4xx means nothing was changed:
+   *   409 `conflict`            — not a refund that needs checking any more (already settled, Square
+   *                               has it, the app is still trying, or it isn't on this bill). That
+   *                               includes a second identical call: it is not answered twice.
+   *   409 `square_shows_refund` — "not_refunded" only: Square shows more refunded on the payment
+   *                               than the app knows about, so the refund looks like it went through.
+   */
+  settleRefund: (id: string, managerPin: string, reason: string, refundId: string, outcome: "refunded" | "not_refunded") =>
+    post<{ refund: RefundDTO }>(`/api/sessions/${enc(id)}/settle-refund`, { managerPin, reason, refundId, outcome }),
   void: (id: string, managerPin: string, reason: string) =>
     post<{ kind: "voided" } | { kind: "already_paid_by_card" }>(`/api/sessions/${enc(id)}/void`, { managerPin, reason }),
   reverse: (id: string, managerPin: string, reason: string) =>

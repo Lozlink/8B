@@ -7,15 +7,15 @@ const geistSans = Geist({ variable: "--font-geist-sans", subsets: ["latin"] });
 const geistMono = Geist_Mono({ variable: "--font-geist-mono", subsets: ["latin"] });
 
 export const metadata: Metadata = {
-  title: { default: "8 Ball Timer", template: "%s · 8 Ball Timer" },
-  description: "Table timer for 8 Ball Lounge staff.",
+  title: { default: "8 Ball Lounge", template: "%s · 8 Ball Lounge" },
+  description: "Tables and bills for 8 Ball Lounge staff.",
   robots: { index: false, follow: false },
-  appleWebApp: { capable: true, title: "8 Ball Timer", statusBarStyle: "black-translucent" },
+  appleWebApp: { capable: true, title: "8 Ball Lounge", statusBarStyle: "black-translucent" },
   formatDetection: { telephone: false },
 };
 
 export const viewport: Viewport = {
-  themeColor: "#0b100e",
+  themeColor: "#0a0a0a",
   colorScheme: "dark",
   viewportFit: "cover",
   width: "device-width",

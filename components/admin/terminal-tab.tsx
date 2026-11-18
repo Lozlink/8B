@@ -65,7 +65,7 @@ export function TerminalTab({ state, reload, onError }: TabProps) {
       </div>
 
       {pairing ? (
-        <div className="flex flex-col items-center gap-3 rounded-2xl border-2 border-brass bg-surface p-6 text-center">
+        <div className="flex flex-col items-center gap-3 rounded-2xl border-2 border-accent bg-surface p-6 text-center">
           {pairing.status === "PAIRED" ? (
             <>
               <p className="text-2xl font-bold text-chalk">Terminal paired</p>
@@ -83,7 +83,7 @@ export function TerminalTab({ state, reload, onError }: TabProps) {
           ) : (
             <>
               <p className="text-lg text-muted">On the Terminal, choose Sign in, then enter this code</p>
-              <p aria-live="polite" className="font-mono text-7xl font-bold tracking-[0.2em] text-brass sm:text-8xl">
+              <p aria-live="polite" className="font-mono text-7xl font-bold tracking-[0.2em] text-accent sm:text-8xl">
                 {pairing.code}
               </p>
               <p className="text-muted">Waiting for the Terminal… the code lasts 5 minutes.</p>
@@ -123,7 +123,7 @@ export function TerminalTab({ state, reload, onError }: TabProps) {
             aria-labelledby="stand-label"
             onClick={() => setOnStand(!onStand)}
             className={`flex h-12 w-20 shrink-0 items-center rounded-full border px-1 transition-colors ${
-              onStand ? "justify-end border-[#2f9265] bg-felt" : "justify-start border-line bg-surface-2"
+              onStand ? "justify-end border-brand bg-brand" : "justify-start border-line bg-surface-2"
             }`}
           >
             <span aria-hidden className="size-9 rounded-full bg-white shadow" />
