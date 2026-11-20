@@ -15,6 +15,9 @@ import type {
 import type { CreateCheckoutInput, CreateReceiptActionInput, TerminalActionState } from "@/lib/square/terminal";
 import type { SquareCheckoutState } from "@/lib/square/terminal";
 import type { PaymentsGateway } from "@/lib/server/payment-ref";
+import type { StockGateway } from "@/lib/server/stock";
+import type { ChangeStockInput, StockCount } from "@/lib/square/inventory";
+import type { SquareOrderItems } from "@/lib/square/orders";
 import type { TerminalGateway } from "@/lib/server/sessions";
 
 type Programmed = CheckoutStatus | Error;
@@ -418,6 +421,12 @@ export class FakeGateway implements TerminalGateway, CashGateway, PosGateway, Pa
     return { id: `act_${++this.actionSeq}`, status: "PENDING" };
   };
 
+  /** The lines of an order Square holds, by order id (null if it never made one). */
+  orderLines(orderId: string): CreateOrderInput["lines"] | null {
+    const found = [...this.orderByKey.values()].find((o) => o.state.id === orderId);
+    return found ? (JSON.parse(found.body) as { lines: CreateOrderInput["lines"] }).lines : null;
+  }
+
   createOrder = async (input: CreateOrderInput): Promise<SquareOrderState> => {
     this.orders.push(input);
     let late: Error | null = null;
@@ -527,5 +536,119 @@ export class FakeCatalog implements CatalogGateway {
     this.calls++;
     if (this.error) throw this.error;
     return this.objects;
+  };
+}
+
+/**
+ * In-memory stand-in for Square's Inventory API. Keeps an IN_STOCK count per variation, so a test
+ * can assert the net effect of what the app sent, and mirrors Square's idempotency-key behaviour
+ * (same key and body: nothing happens twice; same key, different body: refused) and its rule that
+ * `occurred_at` can't be more than 24 h old or in the future.
+ */
+export class FakeStock implements StockGateway {
+  /** Every `changeStock` call, in order (retries included). */
+  changes: ChangeStockInput[] = [];
+  /** Only the calls Square actually applied (a repeat of a known key is not applied again). */
+  applied: ChangeStockInput[] = [];
+  /** Every `getStockCounts` call: the ids asked for. */
+  reads: string[][] = [];
+  /** Square's IN_STOCK count and the time it was worked out, by variation id. A variation not in here has never been counted. */
+  counts = new Map<string, { quantity: number; calculatedAt: Date | null }>();
+  /** What `changeStock` does next: throw this, or null for normal. Cleared after one use unless sticky. */
+  changeError: Error | null = null;
+  changeErrorSticky = false;
+  /** Square answered too slowly: the change is applied (and its key remembered) and THEN changeError is thrown. */
+  failAfterApplying = false;
+  /** Runs while a change is "at Square", before it is applied. */
+  duringChange: (() => Promise<void>) | null = null;
+  /** Throw this from every count read (stays until cleared). */
+  readError: Error | null = null;
+  /** Every order read made for stock: the order id. */
+  orderReads: string[] = [];
+  /** Throw this from every order read (stays until cleared). */
+  orderReadError: Error | null = null;
+  private byKey = new Map<string, string>();
+
+  /** Orders are read back from what the fake Square gateway was asked to create. */
+  constructor(private square: FakeGateway) {}
+
+  reset(): void {
+    this.orderReads = [];
+    this.orderReadError = null;
+    this.changes = [];
+    this.applied = [];
+    this.reads = [];
+    this.counts.clear();
+    this.changeError = null;
+    this.changeErrorSticky = false;
+    this.failAfterApplying = false;
+    this.duringChange = null;
+    this.readError = null;
+    this.byKey.clear();
+  }
+
+  /** Square's count for a variation, or undefined if it was never counted. */
+  count(id: string): number | undefined {
+    return this.counts.get(id)?.quantity;
+  }
+
+  /** Puts a count on the shelf in Square. */
+  set(id: string, quantity: number, calculatedAt: Date | null = new Date()): void {
+    this.counts.set(id, { quantity, calculatedAt });
+  }
+
+  getOrderItems = async (orderId: string): Promise<SquareOrderItems> => {
+    this.orderReads.push(orderId);
+    if (this.orderReadError) throw this.orderReadError;
+    const lines = this.square.orderLines(orderId);
+    if (!lines) throw squareRejection(404, "NOT_FOUND");
+    return {
+      state: "COMPLETED",
+      items: lines.filter((l) => l.catalogObjectId !== null).map((l) => ({ catalogObjectId: l.catalogObjectId as string, quantity: l.quantity })),
+    };
+  };
+
+  getCounts = async (input: { locationId: string; variationIds: string[] }): Promise<StockCount[]> => {
+    this.reads.push(input.variationIds);
+    if (this.readError) throw this.readError;
+    return input.variationIds.flatMap((id) => {
+      const c = this.counts.get(id);
+      return c ? [{ variationId: id, quantity: c.quantity, calculatedAt: c.calculatedAt }] : [];
+    });
+  };
+
+  change = async (input: ChangeStockInput): Promise<void> => {
+    this.changes.push(input);
+    if (this.duringChange) {
+      const hook = this.duringChange;
+      this.duringChange = null;
+      await hook();
+    }
+    let late: Error | null = null;
+    if (this.changeError) {
+      const e = this.changeError;
+      if (!this.changeErrorSticky) this.changeError = null;
+      if (!this.failAfterApplying) throw e;
+      late = e;
+    }
+    const { idempotencyKey, ...rest } = input;
+    const body = JSON.stringify(rest);
+    const known = this.byKey.get(idempotencyKey);
+    if (known !== undefined) {
+      if (known !== body) throw squareRejection(400, "IDEMPOTENCY_KEY_REUSED");
+      if (late) throw late;
+      return;
+    }
+    const age = Date.now() - input.occurredAt.getTime();
+    if (age > 24 * 3_600_000) throw squareRejection(400, "INVALID_VALUE", "Square couldn't change stock: occurred_at is more than 24 hours old.");
+    if (age < 0) throw squareRejection(400, "INVALID_VALUE", "Square couldn't change stock: occurred_at is in the future.");
+    this.byKey.set(idempotencyKey, body);
+    this.applied.push(input);
+    for (const l of input.lines) {
+      const have = this.counts.get(l.variationId);
+      const quantity = (have?.quantity ?? 0) + (input.kind === "sale" ? -l.quantity : l.quantity);
+      this.counts.set(l.variationId, { quantity, calculatedAt: new Date() });
+    }
+    if (late) throw late;
   };
 }

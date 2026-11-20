@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import { BrandMark, Button, Field, Notice, Spinner, inputClass } from "@/components/ui";
+import { BrandLogo, Button, Field, Notice, Spinner, inputClass } from "@/components/ui";
 import { api } from "@/lib/client/api";
 import { errorMessage } from "@/lib/client/errors";
 
@@ -95,10 +95,9 @@ export function EnrolView() {
     >
       <div className="text-center">
         <div className="flex justify-center">
-          <BrandMark size={72} />
+          <BrandLogo height={104} priority />
         </div>
-        <p className="mt-3 text-lg font-semibold text-brand">8 Ball Lounge</p>
-        <h1 className="mt-1 text-3xl font-bold">Set up this iPad</h1>
+        <h1 className="mt-4 text-3xl font-bold">Set up this iPad</h1>
         <p className="mt-1 text-muted">Ask a manager for the enrolment code.</p>
       </div>
 

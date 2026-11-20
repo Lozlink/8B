@@ -12,7 +12,8 @@ import { setTerminalGatewayForTests } from "@/lib/server/sessions";
 import { setPaymentsGatewayForTests } from "@/lib/server/payment-ref";
 import { setPosGatewayForTests } from "@/lib/server/pos-cash";
 import { setCashGatewayForTests } from "@/lib/server/square-cash";
-import { FakeCatalog, FakeGateway } from "./fake-gateway";
+import { setStockGatewayForTests } from "@/lib/server/stock";
+import { FakeCatalog, FakeGateway, FakeStock } from "./fake-gateway";
 
 // Server env the admin/queries modules read lazily (never contacts Square).
 const TEST_ENV: Record<string, string> = {
@@ -37,6 +38,7 @@ export const SESSION_ITEMS_SQL = read("20261117000000_session_items.sql");
 export const SQUARE_CASH_SQL = read("20261118000000_square_cash.sql");
 export const CHECKOUT_BROADCAST_SQL = read("20261118000100_checkout_broadcast.sql");
 export const BILL_EXTRAS_SQL = read("20261119000000_bill_extras.sql");
+export const STOCK_SQL = read("20261121000000_stock_and_barcodes.sql");
 
 /** What Supabase provides out of the box. There is deliberately no `realtime` schema. */
 export const PRELUDE_SQL = `
@@ -63,6 +65,8 @@ export interface Harness {
   gateway: FakeGateway;
   /** Stand-in for the Square catalogue. */
   catalog: FakeCatalog;
+  /** Stand-in for Square's stock counts and inventory adjustments. */
+  stock: FakeStock;
   staff: TestStaff;
   /** Table id by name, e.g. "Table 2". */
   tableId(name: string): string;
@@ -93,6 +97,7 @@ export async function bootHarness(): Promise<Harness> {
   await pg.exec(CHECKOUT_BROADCAST_SQL);
   // One transaction, as the Supabase CLI runs a migration file (`set local` needs one).
   await pg.exec(`begin;\n${BILL_EXTRAS_SQL}\ncommit;`);
+  await pg.exec(`begin;\n${STOCK_SQL}\ncommit;`);
 
   const server = new PGLiteSocketServer({ db: pg, port: 0, host: "127.0.0.1" });
   await server.start();
@@ -122,6 +127,8 @@ export async function bootHarness(): Promise<Harness> {
   setPaymentsGatewayForTests(gateway);
   const catalog = new FakeCatalog();
   setCatalogGatewayForTests(catalog);
+  const stock = new FakeStock(gateway);
+  setStockGatewayForTests(stock);
 
   const raw: Harness["raw"] = async (role, text) => {
     await pg.exec("reset role");
@@ -141,6 +148,7 @@ export async function bootHarness(): Promise<Harness> {
     sql,
     gateway,
     catalog,
+    stock,
     staff: undefined as unknown as TestStaff,
     tableId(name: string) {
       const id = tableIds.get(name);
@@ -153,10 +161,11 @@ export async function bootHarness(): Promise<Harness> {
         // Replica mode skips the no-delete triggers; this is test setup only.
         await pg.exec(`
           set session_replication_role = replica;
-          truncate public.audit_log, public.webhook_events, public.refunds, public.square_cash_records, public.terminal_checkouts,
+          truncate public.audit_log, public.webhook_events, public.refunds, public.stock_moves, public.square_cash_records, public.terminal_checkouts,
             public.session_items, public.session_intervals, public.sessions, public.products, public.discounts, public.login_attempts, public.devices,
             public.rate_cards, public.tables, public.settings, public.staff restart identity cascade;
-          update public.catalog_state set synced_at = null, table_hire_variation_id = null, last_error = null;
+          update public.catalog_state set synced_at = null, table_hire_variation_id = null, last_error = null,
+            stock_synced_at = null, stock_error = null, tax_warning = null, stock_from = '2000-01-01';
           set session_replication_role = origin;
         `);
         await pg.exec(REFERENCE_SQL);
@@ -183,6 +192,7 @@ export async function bootHarness(): Promise<Harness> {
       }
       gateway.reset();
       catalog.reset();
+      stock.reset();
     },
   } as unknown as Harness;
   h.raw = raw;

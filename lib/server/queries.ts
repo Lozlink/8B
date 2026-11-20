@@ -27,6 +27,7 @@ import { posCashConfig } from "./env";
 import { notFound, badRequest } from "./errors";
 import { NO_REFUND_FACTS, loadRefundFacts } from "./payment-ref";
 import { listRefunds, outstandingRefunds, summaryRefunds } from "./refunds";
+import { heldStock } from "./stock";
 import {
   COUNTER_LABEL,
   DISCARD_REASON,
@@ -143,8 +144,20 @@ async function loadItems(q: Db, sessionIds: string[], opts: { removed: boolean }
     order by ${opts.removed ? q`i.removed_at, i.id` : q`i.added_at, i.id`}`;
 }
 
-export function productDTO(p: ProductRow): ProductDTO {
-  return { id: p.id, name: p.name, priceCents: p.price_cents, taxed: p.taxed, category: p.category };
+/**
+ * `held` is how many of this product sit on bills Square hasn't been told about yet (see
+ * `heldStock` in stock.ts). What is left to sell is Square's count less that.
+ */
+export function productDTO(p: ProductRow, held = 0): ProductDTO {
+  return {
+    id: p.id,
+    name: p.name,
+    priceCents: p.price_cents,
+    taxed: p.taxed,
+    category: p.category,
+    barcode: p.barcode,
+    stock: p.tracked && p.stock_count !== null ? p.stock_count - held : null,
+  };
 }
 
 export function discountDTO(d: DiscountRow): DiscountDTO {
@@ -287,7 +300,7 @@ async function loadSessions(q: Db, where: postgres.Fragment): Promise<SessionDTO
 
 export async function getFloor(): Promise<FloorDTO> {
   const q = db();
-  const [tables, sessions, [unpaid], { settings, rateCards }, products, discounts] = await Promise.all([
+  const [tables, sessions, [unpaid], { settings, rateCards }, products, discounts, held] = await Promise.all([
     q<{ id: string; name: string; sort_order: number; active: boolean }[]>`
       select id, name, sort_order, active from public.tables
       where active or id in (select current_table_id from public.sessions where current_table_id is not null)
@@ -313,6 +326,9 @@ export async function getFloor(): Promise<FloorDTO> {
     getPricingConfig(q),
     getProducts(q, { activeOnly: true }),
     getDiscounts(q, { activeOnly: true }),
+    // What sits on bills Square's stock hasn't been told about yet, so the count staff see is
+    // what is really left to sell.
+    heldStock(q),
   ]);
   return {
     serverTime: new Date().toISOString(),
@@ -323,7 +339,7 @@ export async function getFloor(): Promise<FloorDTO> {
     pricing: { settings: pricingSettingsOf(settings), rateCards },
     terminalPaired: !!settings.terminalDeviceId,
     posCashAvailable: posCashConfig() !== null,
-    products: products.map(productDTO),
+    products: products.map((p) => productDTO(p, held.get(p.id) ?? 0)),
     discounts: discounts.map(discountDTO),
   };
 }
@@ -582,6 +598,8 @@ export async function getSummary(dateParam: string | null): Promise<SummaryDTO> 
         "session.reverse_paid",
         "checkout.cancel_failed",
         "square.cash_failed",
+        // Stock Square wasn't told about (or wasn't given back) after a sale or a reopened bill.
+        "square.stock_failed",
         // Cash handed to Square POS that nobody could confirm: Square may hold the sale twice.
         "cash.handoff_unconfirmed",
         "cash.handoff_check_skipped",

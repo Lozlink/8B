@@ -9,7 +9,9 @@ import { db, withTx, type Tx } from "./db";
 import { squareEnv, squareEnvironmentOrNull } from "./env";
 import { badRequest, conflict, notFound } from "./errors";
 import { getCatalogState, getDiscounts, getProducts, getSettings, mapRateCard, type RateCardRow } from "./repo";
+import { productDTO } from "./queries";
 import { getCashOutstanding } from "./square-cash";
+import { getStockOutstanding, heldStock } from "./stock";
 
 const by = (a: Actor, m: Manager) => ({ actorStaffId: a.staffId, approvedByStaffId: m.id, deviceLabel: a.deviceLabel });
 
@@ -30,7 +32,7 @@ const sortedDays = (days: number[]) => [...new Set(days)].sort((a, b) => a - b);
 
 export async function getAdminState(manager: Manager): Promise<AdminStateDTO> {
   const q = db();
-  const [tables, rateCards, settings, staff, devices, products, catalog, squareCash, discounts] = await Promise.all([
+  const [tables, rateCards, settings, staff, devices, products, catalog, squareCash, discounts, held, stock] = await Promise.all([
     q<{ id: string; name: string; sort_order: number; active: boolean }[]>`
       select id, name, sort_order, active from public.tables order by sort_order, name`,
     q<RateCardRow[]>`
@@ -46,22 +48,25 @@ export async function getAdminState(manager: Manager): Promise<AdminStateDTO> {
     getCatalogState(q),
     getCashOutstanding(q),
     getDiscounts(q, { activeOnly: false }),
+    heldStock(q),
+    getStockOutstanding(q),
   ]);
   return {
     manager,
     catalog: {
-      products: products.map((p) => ({
-        id: p.id,
-        name: p.name,
-        priceCents: p.price_cents,
-        taxed: p.taxed,
-        category: p.category,
-        active: p.active,
-      })),
+      products: products.map((p) => ({ ...productDTO(p, held.get(p.id) ?? 0), active: p.active, sku: p.sku, tracked: p.tracked })),
       discounts: discounts.map((d) => ({ id: d.id, name: d.name, kind: d.kind, value: d.value, active: d.active })),
       syncedAt: catalog.synced_at?.toISOString() ?? null,
       tableHireLinked: !!catalog.table_hire_variation_id,
       lastError: catalog.last_error,
+      taxWarning: catalog.tax_warning,
+      stock: {
+        syncedAt: catalog.stock_synced_at?.toISOString() ?? null,
+        lastError: catalog.stock_error,
+        pending: stock.pending,
+        failed: stock.failed,
+        lastMoveError: stock.lastError,
+      },
     },
     squareCash,
     tables: tables.map((t) => ({ id: t.id, name: t.name, sortOrder: t.sort_order, active: t.active })),

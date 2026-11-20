@@ -6,6 +6,7 @@ import { getFloor } from "@/lib/server/queries";
 import { refundsInBackground } from "@/lib/server/refunds";
 import { reconcileInBackground } from "@/lib/server/sessions";
 import { pushCashInBackground } from "@/lib/server/square-cash";
+import { stockInBackground } from "@/lib/server/stock";
 
 export const maxDuration = 30;
 
@@ -28,5 +29,10 @@ export const GET = handler(async () => {
   // writes to `refunds`, which has no floor-broadcast trigger, and to `sessions` only when a refund
   // has really failed and the amount goes back on the bill.
   after(refundsInBackground);
+  // Keeps Square's stock and ours in step: reads the counts (at most once every 2 minutes, however
+  // many iPads are polling), tells Square about paid bills it didn't take the stock off for, and
+  // puts items back for bills that were reopened. A few reads and no writes when there is nothing
+  // to do; it writes only to tables with no floor-broadcast trigger.
+  after(stockInBackground);
   return ok(floor);
 });

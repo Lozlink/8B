@@ -341,6 +341,11 @@ export const api = {
 
   /** Re-reads the item list from Square now. 502/503 if Square can't be reached or isn't configured. */
   adminSyncProducts: () => post<{ count: number }>("/api/admin/products", { op: "sync" }),
+  /**
+   * Re-sends every stock update Square refused or that kept failing, and anything still waiting.
+   * Answers with what is still outstanding afterwards.
+   */
+  adminRetryStock: () => post<{ pending: number; failed: number }>("/api/admin/products", { op: "stock-retry" }),
   /** Turns itemised Square charges on or off. */
   adminItemise: (enabled: boolean, reason: string) =>
     post<{ ok: true }>("/api/admin/products", { op: "itemise", enabled, reason }),

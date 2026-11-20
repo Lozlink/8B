@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { PinDots, PinPad } from "@/components/pin-pad";
-import { BrandMark, Button, Notice, Spinner } from "@/components/ui";
+import { BrandLogo, Button, Notice, Spinner } from "@/components/ui";
 import { api } from "@/lib/client/api";
 import { errorMessage } from "@/lib/client/errors";
 
@@ -62,10 +62,9 @@ export function LoginView() {
   return (
     <div className="flex w-full max-w-2xl flex-col items-center gap-6">
       <div className="text-center">
-        <div className="flex justify-center">
-          <BrandMark size={72} />
-        </div>
-        <h1 className="mt-3 text-3xl font-bold">8 Ball Lounge</h1>
+        <h1 className="flex justify-center">
+          <BrandLogo height={104} priority />
+        </h1>
         <p className="mt-1 text-lg text-muted">{device ? device.label : " "}</p>
       </div>
 

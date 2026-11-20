@@ -2,7 +2,8 @@ import { withTx } from "@/lib/server/db";
 import { webhookEnv } from "@/lib/server/env";
 import { applyDevicePaired } from "@/lib/server/admin";
 import { applyWebhookCheckout } from "@/lib/server/sessions";
-import { deviceCodePayload, terminalCheckoutPayload, verifySquareSignature, webhookEnvelope } from "@/lib/square/webhook";
+import { applyWebhookCounts } from "@/lib/server/stock";
+import { deviceCodePayload, stockCountsFromWebhook, terminalCheckoutPayload, verifySquareSignature, webhookEnvelope } from "@/lib/square/webhook";
 
 // Runs on the Node.js runtime (the default; `runtime` config isn't allowed with cacheComponents).
 // Signature checking needs node:crypto, so never move this to the edge.
@@ -74,6 +75,16 @@ export async function POST(req: Request): Promise<Response> {
           locationId: d.location_id ?? event.location_id ?? null,
           productType: d.product_type,
         });
+      } else if (event.type === "inventory.count.updated") {
+        // Optional: stock is also read on a timer. Read from the environment directly, because
+        // `squareEnv()` throws when Square isn't set up and this event must never 500 for that.
+        const locationId = process.env.SQUARE_LOCATION_ID;
+        const counts = locationId ? stockCountsFromWebhook(object, locationId) : [];
+        if (!counts) {
+          console.warn("[square] inventory.count.updated with unexpected shape", event.event_id);
+          return;
+        }
+        await applyWebhookCounts(tx, counts);
       }
       // Other event types are recorded (deduped) and otherwise ignored.
     });

@@ -139,3 +139,31 @@ export async function getOrder(orderId: string): Promise<SquareOrderDetail> {
     throw toUpstreamError(e, what, "Try again in a moment.");
   }
 }
+
+export interface SquareOrderItems {
+  state: string | null;
+  /** Lines tied to a catalogue item, quantity as a whole number. Ad hoc lines are left out. */
+  items: { catalogObjectId: string; quantity: number }[];
+}
+
+/**
+ * Reads what a paid order actually carried, so stock is judged on what Square holds and not on
+ * what the app remembers sending.
+ */
+export async function getOrderItems(orderId: string): Promise<SquareOrderItems> {
+  const what = "read the items on an order";
+  try {
+    const res = await square().orders.get({ orderId }, { timeoutInSeconds: 8, maxRetries: 0 });
+    const order = res.order;
+    if (!order?.id) throw upstream(`Square returned an unexpected response while trying to ${what}.`);
+    const items: SquareOrderItems["items"] = [];
+    for (const l of order.lineItems ?? []) {
+      if (!l.catalogObjectId) continue;
+      const n = Math.floor(Number(l.quantity));
+      if (Number.isFinite(n) && n >= 1 && n <= 2_147_483_647) items.push({ catalogObjectId: l.catalogObjectId, quantity: n });
+    }
+    return { state: order.state ?? null, items };
+  } catch (e) {
+    throw toUpstreamError(e, what, "Try again in a moment.");
+  }
+}

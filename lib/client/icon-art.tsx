@@ -1,9 +1,22 @@
+import { readFile } from "node:fs/promises";
+import { join } from "node:path";
 import { ImageResponse } from "next/og";
 
-/** Renders the app icon (a black 8 ball with a cream spot on the venue's orange) at any square size. Shared by every icon route. */
-export function renderIcon(px: number): ImageResponse {
-  const ball = Math.round(px * 0.7);
-  const badge = Math.round(ball * 0.46);
+/** The 8 ball from the venue's logo, cut out on its own (public/brand/ball.png). Read once per process. */
+let ball: Promise<string> | null = null;
+function ballDataUri(): Promise<string> {
+  ball ??= readFile(join(process.cwd(), "public", "brand", "ball.png")).then((b) => `data:image/png;base64,${b.toString("base64")}`);
+  return ball;
+}
+
+/**
+ * Renders the app icon (the logo's 8 ball on the venue's orange) at any square size. Shared by every
+ * icon route. The ball fills 72% of the square, inside the middle 80% a maskable icon must keep clear,
+ * so the same picture is safe when a launcher crops it to a circle.
+ */
+export async function renderIcon(px: number): Promise<ImageResponse> {
+  const size = Math.round(px * 0.72);
+  const src = await ballDataUri();
   return new ImageResponse(
     (
       <div
@@ -16,35 +29,8 @@ export function renderIcon(px: number): ImageResponse {
           background: "#f47b20",
         }}
       >
-        <div
-          style={{
-            width: ball,
-            height: ball,
-            borderRadius: ball,
-            background: "#0a0a0a",
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            border: `${Math.max(2, Math.round(px * 0.02))}px solid #f6e7d2`,
-          }}
-        >
-          <div
-            style={{
-              width: badge,
-              height: badge,
-              borderRadius: badge,
-              background: "#f6e7d2",
-              color: "#0a0a0a",
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-              fontSize: Math.round(badge * 0.78),
-              fontWeight: 700,
-            }}
-          >
-            8
-          </div>
-        </div>
+        {/* eslint-disable-next-line @next/next/no-img-element, jsx-a11y/alt-text -- drawn into a PNG, not rendered as HTML */}
+        <img src={src} width={size} height={size} />
       </div>
     ),
     { width: px, height: px },

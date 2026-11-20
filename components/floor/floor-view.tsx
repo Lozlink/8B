@@ -1,15 +1,20 @@
 "use client";
 
 import { useMemo, useState } from "react";
+import { useRouter } from "next/navigation";
 import { ChargeSheet } from "@/components/charge-sheet";
 import { SessionDetailSheet } from "@/components/session-detail-sheet";
 import { Button, Sheet, Spinner } from "@/components/ui";
 import { useToast } from "@/components/toast";
 import { api } from "@/lib/client/api";
+import { findByBarcode } from "@/lib/client/barcode";
+import { authRedirect, errorMessage } from "@/lib/client/errors";
 import { useFloor, useServerNow } from "@/lib/client/floor-context";
 import { useKeyedAction } from "@/lib/client/use-action";
+import { useScanHandler } from "@/lib/client/use-scan-handler";
 import type { SessionDTO, TableDTO } from "@/lib/domain/types";
 import { formatClock } from "@/lib/format";
+import { formatCents } from "@/lib/pricing";
 import { estimate } from "@/lib/client/session-view";
 import { TableCard, type CardActions } from "./table-card";
 
@@ -22,7 +27,8 @@ type Overlay =
   | null;
 
 export function FloorView() {
-  const { floor } = useFloor();
+  const { floor, offline } = useFloor();
+  const router = useRouter();
   const nowMs = useServerNow();
   const toast = useToast();
   const { run, inFlight, busy } = useKeyedAction();
@@ -47,6 +53,40 @@ export function FloorView() {
     }),
     [run],
   );
+
+  // Scanning with no bill open: one item starts a counter sale with it already on. Sheets register their
+  // own handlers, which take over while they are open.
+  const scanToCounterSale = (code: string) => {
+    if (offline) {
+      toast.show("No connection. Wait for it to come back before starting a sale.", "error");
+      return;
+    }
+    const matches = findByBarcode(floor?.products ?? [], code);
+    if (matches.length === 0) {
+      toast.show(`No item has the barcode ${code}. Add it to the item in Square, then refresh under Admin → Items.`, "error");
+      return;
+    }
+    if (matches.length > 1) {
+      toast.show(`More than one item has the barcode ${code}. Start a counter sale and pick the item there.`, "error");
+      return;
+    }
+    const item = matches[0];
+    void run(COUNTER_KEY, async () => {
+      const sale = await api.counterSale();
+      try {
+        await api.addItem(sale.sessionId, item.id, 1);
+        toast.show(`${item.name} added, ${formatCents(item.priceCents)}`, "success");
+      } catch (e) {
+        // The sale exists; open it anyway (an empty one is thrown away when its sheet closes).
+        const dest = authRedirect(e);
+        if (dest) router.replace(dest);
+        else toast.show(errorMessage(e), "error");
+      }
+      setOverlay({ kind: "charge", sessionId: sale.sessionId, created: true });
+      return sale;
+    });
+  };
+  useScanHandler(scanToCounterSale, overlay === null && !offline && !busy(COUNTER_KEY) && !!floor);
 
   if (!floor) return <Spinner label="Loading tables" />;
 

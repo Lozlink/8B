@@ -61,3 +61,53 @@ export const deviceCodePayload = z.object({
     product_type: z.string().optional(),
   }),
 });
+
+/**
+ * `inventory.count.updated`: `data.object.inventory_counts[]`, one entry per state Square counts
+ * (in stock, sold, waste…). Only the shape of the list is checked here; each entry is read on its
+ * own so one odd entry never costs us the others.
+ */
+export const inventoryCountsPayload = z.object({ inventory_counts: z.array(z.unknown()) });
+
+const inventoryCount = z.object({
+  catalog_object_id: z.string().min(1),
+  catalog_object_type: z.string().optional().nullable(),
+  location_id: z.string().optional().nullable(),
+  quantity: z.union([z.string(), z.number()]).optional().nullable(),
+  state: z.string().optional().nullable(),
+  calculated_at: z.string().optional().nullable(),
+});
+
+export interface WebhookStockCount {
+  variationId: string;
+  quantity: number;
+  calculatedAt: Date | null;
+}
+
+/**
+ * The shelf counts in an `inventory.count.updated` payload for our location: IN_STOCK entries for
+ * an item variation, quantity rounded down to a whole unit. null = the payload isn't the shape we
+ * expect (the caller logs it and carries on).
+ */
+export function stockCountsFromWebhook(object: unknown, locationId: string): WebhookStockCount[] | null {
+  const p = inventoryCountsPayload.safeParse(object);
+  if (!p.success) return null;
+  const out: WebhookStockCount[] = [];
+  for (const raw of p.data.inventory_counts) {
+    const c = inventoryCount.safeParse(raw);
+    if (!c.success) continue;
+    const { catalog_object_id, catalog_object_type, location_id, quantity, state, calculated_at } = c.data;
+    if (state !== "IN_STOCK" || location_id !== locationId) continue;
+    if (catalog_object_type && catalog_object_type !== "ITEM_VARIATION") continue;
+    const n = typeof quantity === "number" ? quantity : quantity ? Number(quantity) : NaN;
+    // A count too big for the database column is not a real shelf count; one of those must never fail the event.
+    if (!Number.isFinite(n) || Math.abs(n) > 2_147_483_647) continue;
+    const at = calculated_at ? new Date(calculated_at) : null;
+    out.push({
+      variationId: catalog_object_id,
+      quantity: Math.floor(n),
+      calculatedAt: at && !Number.isNaN(at.getTime()) ? at : null,
+    });
+  }
+  return out;
+}

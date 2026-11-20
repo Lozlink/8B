@@ -2,11 +2,11 @@ import "server-only";
 import type { Square } from "square";
 import { square, toUpstreamError } from "./client";
 
-/** Reads every ITEM, CATEGORY and DISCOUNT object in the catalogue (all pages). Variations come nested in their item. */
+/** Reads every ITEM, CATEGORY, DISCOUNT and TAX object in the catalogue (all pages). Variations come nested in their item. */
 export async function listCatalogObjects(): Promise<Square.CatalogObject[]> {
   try {
     const out: Square.CatalogObject[] = [];
-    const page = await square().catalog.list({ types: "ITEM,CATEGORY,DISCOUNT" });
+    const page = await square().catalog.list({ types: "ITEM,CATEGORY,DISCOUNT,TAX" });
     for await (const obj of page) out.push(obj);
     return out;
   } catch (e) {
@@ -23,6 +23,11 @@ export interface CatalogProduct {
   priceCents: number;
   taxed: boolean;
   category: string | null;
+  /** The variation's GTIN (Square's `upc`), digits only. Null if it has none or it isn't a barcode. */
+  barcode: string | null;
+  sku: string | null;
+  /** Square tracks stock for this variation at our location. */
+  tracked: boolean;
   sortOrder: number;
 }
 
@@ -43,12 +48,29 @@ export interface CatalogMapping {
   tableHireVariationId: string | null;
   /** By name. Empty when the catalogue has none. */
   discounts: CatalogDiscount[];
+  /**
+   * Set when something sold here has a tax that Square adds on top of the price. The app's prices
+   * include GST, so such an item makes Square's total differ from the bill and an itemised charge
+   * is refused. Null when every tax is included in the price.
+   */
+  taxWarning: string | null;
 }
 
 const NAME_MAX = 120; // products.name / session_items.name check constraint
 const PRICE_MAX = 1_000_000; // products.price_cents check constraint
 const DISCOUNT_NAME_MAX = 60; // discounts.name / sessions.discount_name check constraint
 const DISCOUNT_AMOUNT_MAX = 1_000_000; // $10,000: more than any bill here; keeps the integer column safe
+const SKU_MAX = 120; // products.sku check constraint
+
+/**
+ * Square's `upc` as a barcode staff can scan: spaces and hyphens dropped, 6 to 14 digits (the
+ * products.barcode check constraint). Anything else (letters, a too-long value set through the
+ * API) is not a barcode and is left out rather than failing the refresh.
+ */
+export function toBarcode(upc: string | null | undefined): string | null {
+  const digits = (upc ?? "").replace(/[\s-]/g, "");
+  return /^\d{6,14}$/.test(digits) ? digits : null;
+}
 
 interface Presence {
   presentAtAllLocations?: boolean;
@@ -67,6 +89,9 @@ interface Variation {
   pricingType: string | undefined;
   priceCents: number | null;
   currency: string | undefined;
+  barcode: string | null;
+  sku: string | null;
+  tracked: boolean;
 }
 
 /** The item's variations that can be sold at this location, with any per-location price applied. */
@@ -86,6 +111,10 @@ function variationsAt(item: Square.CatalogObject.Item, locationId: string): Vari
       // Amounts come back as bigint; convert before anything tries to JSON.stringify them.
       priceCents: money?.amount != null ? Number(money.amount) : null,
       currency: money?.currency,
+      barcode: toBarcode(d.upc),
+      sku: (d.sku ?? "").trim().slice(0, SKU_MAX).trim() || null,
+      // The location's own setting wins; unset at both levels means stock isn't tracked.
+      tracked: (override?.trackInventory ?? d.trackInventory) === true,
     });
   }
   return out;
@@ -148,6 +177,22 @@ function mapDiscount(o: Square.CatalogObject, locationId: string): CatalogDiscou
   }
 }
 
+const TAX_WARNING_MAX = 300;
+
+/** One staff-readable sentence naming the first few items whose tax is added on top of the price. */
+function taxWarningFor(addedOnTop: readonly { item: string; tax: string }[]): string | null {
+  if (addedOnTop.length === 0) return null;
+  const sorted = [...addedOnTop].sort((a, b) => byText(a.item, b.item));
+  const shown = sorted.slice(0, 3).map((x) => x.item.slice(0, 40));
+  const more = sorted.length - shown.length;
+  const which = more > 0 ? `${shown.join(", ")} and ${more} more` : shown.join(", ");
+  const n = sorted.length;
+  return `${n} item${n === 1 ? " has" : "s have"} ${sorted[0].tax} added on top of the price in Square: ${which}. Prices here include GST, so a bill with one of these on it can't be charged item by item. In Square, set the tax to be included in the item price, then refresh.`.slice(
+    0,
+    TAX_WARNING_MAX,
+  );
+}
+
 /**
  * Turns the catalogue into the list staff can sell from. Pure: no I/O.
  *
@@ -163,6 +208,17 @@ export function mapCatalog(objects: readonly Square.CatalogObject[], locationId:
     const name = o.categoryData?.name?.trim();
     if (name) categoryNames.set(o.id, name);
   }
+
+  // Taxes that are added on top of the price here. GST in Australia is set up as included in the
+  // price; one of these on an item means Square would charge more than the bill says.
+  const additiveTaxes = new Map<string, string>();
+  for (const o of objects) {
+    if (o.type !== "TAX" || !o.id || o.isDeleted || !presentAt(o, locationId)) continue;
+    const t = o.taxData;
+    if (!t || t.enabled === false || t.inclusionType !== "ADDITIVE") continue;
+    additiveTaxes.set(o.id, (t.name ?? "").trim() || "a tax");
+  }
+  const addedOnTop: { item: string; tax: string }[] = [];
 
   const found: Omit<CatalogProduct, "sortOrder">[] = [];
   let tableHireVariationId: string | null = null;
@@ -190,13 +246,36 @@ export function mapCatalog(objects: readonly Square.CatalogObject[], locationId:
         v.priceCents >= 0 &&
         v.priceCents <= PRICE_MAX,
     );
-    const categoryId = item.categories?.find((c) => c.id && categoryNames.has(c.id))?.id ?? item.categoryId ?? null;
+    // An item can sit in several categories (a menu such as "Pool Hall" as well as "Drinks"). The
+    // reporting category is the one Square files its sales under, so that is the one staff see.
+    const reportingId = item.reportingCategory?.id;
+    const categoryId =
+      (reportingId && categoryNames.has(reportingId) ? reportingId : null) ??
+      item.categories?.find((c) => c.id && categoryNames.has(c.id))?.id ??
+      item.categoryId ??
+      null;
     const category = categoryId ? categoryNames.get(categoryId) ?? null : null;
     const taxed = (item.taxIds?.length ?? 0) > 0;
 
+    // Only items the app charges for: something on the list, or the table hire item itself.
+    const additive = item.taxIds?.find((id) => additiveTaxes.has(id));
+    if (additive && (sellable.length > 0 || itemName.toLowerCase() === "table hire")) {
+      addedOnTop.push({ item: itemName, tax: additiveTaxes.get(additive) ?? "a tax" });
+    }
+
     for (const v of sellable) {
       const name = sellable.length > 1 && v.name ? `${itemName} – ${v.name}` : itemName;
-      found.push({ id: v.id, itemId: o.id, name: name.slice(0, NAME_MAX).trim(), priceCents: v.priceCents, taxed, category });
+      found.push({
+        id: v.id,
+        itemId: o.id,
+        name: name.slice(0, NAME_MAX).trim(),
+        priceCents: v.priceCents,
+        taxed,
+        category,
+        barcode: v.barcode,
+        sku: v.sku,
+        tracked: v.tracked,
+      });
     }
   }
 
@@ -223,5 +302,10 @@ export function mapCatalog(objects: readonly Square.CatalogObject[], locationId:
   }
   discounts.sort((a, b) => byText(a.name, b.name) || byText(a.id, b.id));
 
-  return { products: found.map((p, i) => ({ ...p, sortOrder: i })), tableHireVariationId, discounts };
+  return {
+    products: found.map((p, i) => ({ ...p, sortOrder: i })),
+    tableHireVariationId,
+    discounts,
+    taxWarning: taxWarningFor(addedOnTop),
+  };
 }

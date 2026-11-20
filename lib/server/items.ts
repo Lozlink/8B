@@ -35,14 +35,15 @@ export async function syncProducts(): Promise<number> {
   try {
     const locationId = squareEnv().SQUARE_LOCATION_ID;
     // Square is called before the transaction opens, so a slow catalogue read holds no locks.
-    const { products, tableHireVariationId, discounts } = catalog.mapCatalog(await gateway.list(), locationId);
+    const { products, tableHireVariationId, discounts, taxWarning } = catalog.mapCatalog(await gateway.list(), locationId);
 
     return await withTx(async (tx) => {
       // The state row doubles as the lock: two syncs at once would otherwise both try to insert
       // the same new product.
       await tx`select 1 from public.catalog_state where id for update`;
       const existing = await tx<ProductRow[]>`
-        select id, item_id, name, price_cents, taxed, category, sort_order, active from public.products`;
+        select id, item_id, name, price_cents, taxed, category, sort_order, active, barcode, sku, tracked, stock_count, stock_at
+        from public.products`;
       const current = new Map(existing.map((r) => [r.id, r]));
 
       for (const p of products) {
@@ -50,8 +51,9 @@ export async function syncProducts(): Promise<number> {
         current.delete(p.id);
         if (!row) {
           await tx`
-            insert into public.products (id, item_id, name, price_cents, taxed, category, sort_order, active)
-            values (${p.id}, ${p.itemId}, ${p.name}, ${p.priceCents}, ${p.taxed}, ${p.category}, ${p.sortOrder}, true)`;
+            insert into public.products (id, item_id, name, price_cents, taxed, category, sort_order, active, barcode, sku, tracked, tracked_since)
+            values (${p.id}, ${p.itemId}, ${p.name}, ${p.priceCents}, ${p.taxed}, ${p.category}, ${p.sortOrder}, true,
+                    ${p.barcode}, ${p.sku}, ${p.tracked}, case when ${p.tracked}::boolean then now() end)`;
           continue;
         }
         const same =
@@ -61,13 +63,21 @@ export async function syncProducts(): Promise<number> {
           row.price_cents === p.priceCents &&
           row.taxed === p.taxed &&
           row.category === p.category &&
-          row.sort_order === p.sortOrder;
+          row.sort_order === p.sortOrder &&
+          row.barcode === p.barcode &&
+          row.sku === p.sku &&
+          row.tracked === p.tracked;
         // Only rows that changed are written, so updated_at says when a price or name last moved.
         if (same) continue;
+        // `tracked_since` is stamped when tracking switches on and left alone otherwise (switching off
+        // keeps it; the next switch on overwrites it). It only ever changes together with `tracked`,
+        // so an unchanged product is still not rewritten.
         await tx`
           update public.products set
             item_id = ${p.itemId}, name = ${p.name}, price_cents = ${p.priceCents}, taxed = ${p.taxed},
-            category = ${p.category}, sort_order = ${p.sortOrder}, active = true, synced_at = now()
+            category = ${p.category}, sort_order = ${p.sortOrder}, active = true, synced_at = now(),
+            barcode = ${p.barcode}, sku = ${p.sku}, tracked = ${p.tracked},
+            tracked_since = case when ${p.tracked}::boolean and not tracked then now() else tracked_since end
           where id = ${p.id}`;
       }
 
@@ -89,7 +99,8 @@ export async function syncProducts(): Promise<number> {
 
       await tx`
         update public.catalog_state
-        set synced_at = now(), last_error = ${discountsError}, table_hire_variation_id = ${tableHireVariationId}
+        set synced_at = now(), last_error = ${discountsError}, table_hire_variation_id = ${tableHireVariationId},
+            tax_warning = ${taxWarning}
         where id`;
       return products.length;
     });

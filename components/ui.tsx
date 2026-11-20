@@ -1,5 +1,6 @@
 "use client";
 
+import Image from "next/image";
 import { useEffect, useRef, type ButtonHTMLAttributes, type ReactNode } from "react";
 
 // ---------------------------------------------------------------------------
@@ -193,18 +194,21 @@ export function Money({ children, className = "" }: { children: ReactNode; class
 }
 
 /**
- * The venue's mark: a black 8 ball with a cream spot on an orange disc, as on the sign.
+ * The venue's mark: the 8 ball from its logo on an orange disc, as on the app icon.
  * Decorative; the name next to it carries the meaning.
  */
 export function BrandMark({ size = 32 }: { size?: number }) {
+  const ball = Math.round(size * 0.84);
   return (
-    <svg aria-hidden width={size} height={size} viewBox="0 0 64 64" className="shrink-0">
-      <circle cx="32" cy="32" r="32" fill="#f47b20" />
-      <circle cx="32" cy="32" r="23" fill="#0a0a0a" stroke="#f6e7d2" strokeWidth="2.5" />
-      <circle cx="32" cy="32" r="11.5" fill="#f6e7d2" />
-      <text x="32" y="38.5" textAnchor="middle" fontSize="18" fontWeight="800" fill="#0a0a0a" fontFamily="system-ui, sans-serif">
-        8
-      </text>
-    </svg>
+    <span aria-hidden className="flex shrink-0 items-center justify-center rounded-full bg-brand" style={{ width: size, height: size }}>
+      <Image src="/brand/ball.png" alt="" width={ball} height={ball} />
+    </span>
   );
+}
+
+/** The venue's full logo (ball and name), in the version cut for dark backgrounds. `height` in px. */
+export function BrandLogo({ height = 96, priority = false }: { height?: number; priority?: boolean }) {
+  // The file is 1400 × 544.
+  const width = Math.round((height * 1400) / 544);
+  return <Image src="/brand/logo-on-dark.png" alt="8 Ball Lounge" width={width} height={height} priority={priority} className="h-auto max-w-full" />;
 }

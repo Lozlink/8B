@@ -44,6 +44,15 @@ export interface ProductDTO {
   /** false = GST-free (the Square item has no tax attached). */
   taxed: boolean;
   category: string | null;
+  /** The item's barcode in Square (its GTIN), digits only. null = it has none. */
+  barcode: string | null;
+  /**
+   * How many are left to sell right now: Square's count, less what is sitting on bills Square
+   * hasn't been told about yet (unpaid bills, and paid ones still on their way). Can be zero or
+   * negative; the item can still be sold. null = Square doesn't track stock for this item, or it
+   * has never been counted there.
+   */
+  stock: number | null;
 }
 
 /**
@@ -426,6 +435,23 @@ export interface AdminSettingsDTO {
 export interface AdminProductDTO extends ProductDTO {
   /** false = no longer in the Square catalogue (kept so old bills still resolve). */
   active: boolean;
+  sku: string | null;
+  /** true when Square tracks stock for this item at our location. */
+  tracked: boolean;
+}
+
+/** How the app's stock updates to Square are going. */
+export interface AdminStockDTO {
+  /** ISO; when stock counts were last read from Square. null = never. */
+  syncedAt: string | null;
+  /** Why the last read of the counts failed, if it did. */
+  lastError: string | null;
+  /** Paid bills whose items haven't come off Square's stock yet. */
+  pending: number;
+  /** Stock updates Square refused or that kept failing. A manager can retry them. */
+  failed: number;
+  /** The most recent reason one failed. */
+  lastMoveError: string | null;
 }
 
 export interface AdminDiscountDTO extends DiscountDTO {
@@ -443,6 +469,9 @@ export interface AdminCatalogDTO {
   tableHireLinked: boolean;
   /** Why the last refresh from Square failed, if it did. */
   lastError: string | null;
+  /** Set when an item's tax is added on top of its price in Square instead of included in it. */
+  taxWarning: string | null;
+  stock: AdminStockDTO;
 }
 
 export interface AdminStateDTO {

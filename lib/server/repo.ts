@@ -203,12 +203,25 @@ export interface ProductRow {
   category: string | null;
   sort_order: number;
   active: boolean;
+  /** GTIN, digits only. */
+  barcode: string | null;
+  sku: string | null;
+  /** Square tracks stock for it at our location. */
+  tracked: boolean;
+  /** Square's IN_STOCK count; null = not tracked or never counted. */
+  stock_count: number | null;
+  stock_at: Date | null;
 }
 
 export interface CatalogStateRow {
   synced_at: Date | null;
   table_hire_variation_id: string | null;
   last_error: string | null;
+  stock_synced_at: Date | null;
+  stock_error: string | null;
+  /** Bills paid before this are never touched by the stock pass. */
+  stock_from: Date;
+  tax_warning: string | null;
 }
 
 export const BILL_BUSY_MESSAGE = "Someone else is working on this bill. Give it a few seconds and try again.";
@@ -315,7 +328,7 @@ export async function cashHandoffInProgress(q: Db, sessionId: string): Promise<D
 
 export async function getProducts(q: Db, opts: { activeOnly: boolean }): Promise<ProductRow[]> {
   return q<ProductRow[]>`
-    select id, item_id, name, price_cents, taxed, category, sort_order, active
+    select id, item_id, name, price_cents, taxed, category, sort_order, active, barcode, sku, tracked, stock_count, stock_at
     from public.products
     where ${opts.activeOnly ? q`active` : q`true`}
     order by sort_order, name, id`;
@@ -323,7 +336,8 @@ export async function getProducts(q: Db, opts: { activeOnly: boolean }): Promise
 
 export async function getCatalogState(q: Db): Promise<CatalogStateRow> {
   const [r] = await q<CatalogStateRow[]>`
-    select synced_at, table_hire_variation_id, last_error from public.catalog_state where id`;
+    select synced_at, table_hire_variation_id, last_error, stock_synced_at, stock_error, stock_from, tax_warning
+    from public.catalog_state where id`;
   if (!r) throw new Error("catalog_state row missing — run the session-items migration");
   return r;
 }

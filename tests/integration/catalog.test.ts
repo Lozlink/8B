@@ -114,8 +114,8 @@ describe("C1. catalogue mapping", () => {
       LOC,
     );
     expect(products).toEqual([
-      { id: "V_COKE", itemId: "I_COKE", name: "Coke", priceCents: 450, taxed: true, category: "Drinks", sortOrder: 0 },
-      { id: "V_CHIPS", itemId: "I_CHIPS", name: "Chips", priceCents: 600, taxed: true, category: "Snacks", sortOrder: 1 },
+      { id: "V_COKE", itemId: "I_COKE", name: "Coke", priceCents: 450, taxed: true, category: "Drinks", barcode: null, sku: null, tracked: false, sortOrder: 0 },
+      { id: "V_CHIPS", itemId: "I_CHIPS", name: "Chips", priceCents: 600, taxed: true, category: "Snacks", barcode: null, sku: null, tracked: false, sortOrder: 1 },
     ]);
     // plain numbers, safe to JSON.stringify (the SDK hands back bigint)
     expect(() => JSON.stringify(products)).not.toThrow();
@@ -231,7 +231,7 @@ describe("C1. catalogue mapping", () => {
     const hire = (name: string, vars: Square.CatalogObject.ItemVariation[], o: ItemOpts = {}) => item("I_HIRE", name, vars, o);
     const open = variation("V_HIRE", { pricing: "VARIABLE_PRICING" });
 
-    expect(mapCatalog([hire("  TABLE Hire ", [open])], LOC)).toEqual({ products: [], tableHireVariationId: "V_HIRE", discounts: [] });
+    expect(mapCatalog([hire("  TABLE Hire ", [open])], LOC)).toEqual({ products: [], tableHireVariationId: "V_HIRE", discounts: [], taxWarning: null });
     expect(mapCatalog([hire("Table hire (per hour)", [open])], LOC).tableHireVariationId).toBeNull();
     expect(mapCatalog([hire("Table hire", [variation("V_FIXED", { cents: 2500 })])], LOC).tableHireVariationId).toBeNull();
     expect(mapCatalog([hire("Table hire", [variation("V_HIRE", { pricing: "VARIABLE_PRICING", presence: { absentAtLocationIds: [LOC] } })])], LOC).tableHireVariationId).toBeNull();
@@ -505,9 +505,9 @@ describe("C4. DTOs", () => {
 
     const f = await getFloor();
     expect(f.products).toEqual([
-      { id: "VAR_COKE", name: "Coke", priceCents: 450, taxed: true, category: "Drinks" },
-      { id: "VAR_WATER", name: "Water", priceCents: 300, taxed: false, category: "Drinks" },
-      { id: "VAR_CHIPS", name: "Chips", priceCents: 600, taxed: true, category: null },
+      { id: "VAR_COKE", name: "Coke", priceCents: 450, taxed: true, category: "Drinks", barcode: null, stock: null },
+      { id: "VAR_WATER", name: "Water", priceCents: 300, taxed: false, category: "Drinks", barcode: null, stock: null },
+      { id: "VAR_CHIPS", name: "Chips", priceCents: 600, taxed: true, category: null, barcode: null, stock: null },
     ]);
     const sa = f.sessions.find((s) => s.id === a);
     expect(sa).toMatchObject({ itemsCents: 1200, totalCents: null });
@@ -647,15 +647,17 @@ describe("C4. DTOs", () => {
     let s = await getAdminState(h.staff.manager);
     expect(s.catalog).toEqual({
       products: [
-        { id: "VAR_COKE", name: "Coke", priceCents: 450, taxed: true, category: "Drinks", active: true },
-        { id: "VAR_WATER", name: "Water", priceCents: 300, taxed: false, category: "Drinks", active: true },
-        { id: "VAR_CHIPS", name: "Chips", priceCents: 600, taxed: true, category: null, active: true },
-        { id: "VAR_OLD", name: "Old pie", priceCents: 500, taxed: true, category: null, active: false },
+        { id: "VAR_COKE", name: "Coke", priceCents: 450, taxed: true, category: "Drinks", active: true, barcode: null, stock: null, sku: null, tracked: false },
+        { id: "VAR_WATER", name: "Water", priceCents: 300, taxed: false, category: "Drinks", active: true, barcode: null, stock: null, sku: null, tracked: false },
+        { id: "VAR_CHIPS", name: "Chips", priceCents: 600, taxed: true, category: null, active: true, barcode: null, stock: null, sku: null, tracked: false },
+        { id: "VAR_OLD", name: "Old pie", priceCents: 500, taxed: true, category: null, active: false, barcode: null, stock: null, sku: null, tracked: false },
       ],
       discounts: [],
       syncedAt: null,
       tableHireLinked: false,
       lastError: null,
+      taxWarning: null,
+      stock: { syncedAt: null, lastError: null, pending: 0, failed: 0, lastMoveError: null },
     });
     expect(s.settings.itemiseCharges).toBe(true);
 
@@ -687,5 +689,195 @@ describe("C4. DTOs", () => {
     await setItemiseCharges(managerActor, manager, true, "Fixed by Square");
     expect((await getAdminState(manager)).settings.itemiseCharges).toBe(true);
     expect(await rows()).toHaveLength(2);
+  });
+});
+
+describe("C5. barcodes, the stock-tracking flag and the tax check", () => {
+  const tax = (id: string, name: string, inclusionType: "ADDITIVE" | "INCLUSIVE", extra: Partial<Square.CatalogObject.Tax> = {}): Square.CatalogObject.Tax => ({
+    type: "TAX",
+    id,
+    presentAtAllLocations: true,
+    taxData: { name, inclusionType, percentage: "10", enabled: true },
+    ...extra,
+  });
+
+  it("copies the GTIN and SKU, and drops a `upc` that isn't a barcode", () => {
+    const { products } = mapCatalog(
+      [
+        item("I_A", "A", [variation("V_A", { data: { upc: "9300675024235", sku: " COKE-375 " } })]),
+        item("I_B", "B", [variation("V_B", { data: { upc: " 0 12345-678905 " } })]),
+        item("I_C", "C", [variation("V_C", { data: { upc: "ABC123", sku: "   " } })]),
+        item("I_D", "D", [variation("V_D", { data: { upc: "123456789012345" } })]),
+        item("I_E", "E", [variation("V_E")]),
+      ],
+      LOC,
+    );
+    expect(products.map((p) => [p.id, p.barcode, p.sku])).toEqual([
+      ["V_A", "9300675024235", "COKE-375"],
+      ["V_B", "012345678905", null],
+      ["V_C", null, null],
+      ["V_D", null, null],
+      ["V_E", null, null],
+    ]);
+  });
+
+  it("stock is tracked when Square says so, and the location's own setting wins", () => {
+    const { products } = mapCatalog(
+      [
+        item("I_A", "A", [variation("V_A", { data: { trackInventory: true } })]),
+        item("I_B", "B", [variation("V_B")]),
+        item("I_C", "C", [
+          variation("V_C", { data: { trackInventory: true, locationOverrides: [{ locationId: LOC, trackInventory: false }] } }),
+        ]),
+        item("I_D", "D", [
+          variation("V_D", { data: { trackInventory: false, locationOverrides: [{ locationId: LOC, trackInventory: true }] } }),
+        ]),
+        item("I_E", "E", [
+          variation("V_E", { data: { trackInventory: true, locationOverrides: [{ locationId: "LOC_OTHER", trackInventory: false }] } }),
+        ]),
+      ],
+      LOC,
+    );
+    expect(products.map((p) => [p.id, p.tracked])).toEqual([
+      ["V_A", true],
+      ["V_B", false],
+      ["V_C", false],
+      ["V_D", true],
+      ["V_E", true],
+    ]);
+  });
+
+  it("an item in several categories is filed under its reporting category", () => {
+    const { products } = mapCatalog(
+      [
+        category("CAT_MENU", "Pool Hall"),
+        category("CAT_DRINKS", "Drinks"),
+        item("I_A", "Pepsi", [variation("V_A")], { categoryIds: ["CAT_MENU", "CAT_DRINKS"], data: { reportingCategory: { id: "CAT_DRINKS" } } }),
+        // No reporting category: the first category it is in.
+        item("I_B", "Snack", [variation("V_B")], { categoryIds: ["CAT_MENU"] }),
+        // A reporting category the catalogue doesn't have falls back the same way.
+        item("I_C", "Mars", [variation("V_C")], { categoryIds: ["CAT_MENU"], data: { reportingCategory: { id: "CAT_GONE" } } }),
+      ],
+      LOC,
+    );
+    expect(products.map((p) => [p.name, p.category])).toEqual([
+      ["Pepsi", "Drinks"],
+      ["Mars", "Pool Hall"],
+      ["Snack", "Pool Hall"],
+    ]);
+  });
+
+  it("no warning when every tax is included in the price", () => {
+    const { taxWarning } = mapCatalog(
+      [tax("TAX_GST", "GST", "INCLUSIVE"), item("I_A", "A", [variation("V_A")], { taxIds: ["TAX_GST"] }), item("I_B", "B", [variation("V_B")], { taxIds: [] })],
+      LOC,
+    );
+    expect(taxWarning).toBeNull();
+  });
+
+  it("warns, naming the items, when a tax is added on top of the price", () => {
+    const objects = [
+      tax("TAX_GST", "GST", "INCLUSIVE"),
+      tax("TAX_ADD", "GST (added)", "ADDITIVE"),
+      item("I_A", "Pepsi", [variation("V_A")], { taxIds: ["TAX_ADD"] }),
+      item("I_B", "Coke", [variation("V_B")], { taxIds: ["TAX_GST", "TAX_ADD"] }),
+      item("I_C", "Fanta", [variation("V_C")], { taxIds: ["TAX_GST"] }),
+      item("I_HIRE", "Table hire", [variation("V_HIRE", { pricing: "VARIABLE_PRICING" })], { taxIds: ["TAX_ADD"] }),
+      // Nothing the app can sell: not worth a warning.
+      item("I_OPEN", "Open price", [variation("V_OPEN", { pricing: "VARIABLE_PRICING" })], { taxIds: ["TAX_ADD"] }),
+    ];
+    const { taxWarning, products } = mapCatalog(objects, LOC);
+    expect(taxWarning).toMatch(/^3 items have GST \(added\) added on top of the price in Square: Coke, Pepsi, Table hire\./);
+    // The check never changes what is for sale.
+    expect(products.map((p) => p.name)).toEqual(["Coke", "Fanta", "Pepsi"]);
+  });
+
+  it("ignores an added-on tax that is switched off, deleted or not at our location, and caps a long list", () => {
+    const quiet = mapCatalog(
+      [
+        tax("TAX_OFF", "Off", "ADDITIVE", { taxData: { name: "Off", inclusionType: "ADDITIVE", enabled: false } }),
+        tax("TAX_DEL", "Deleted", "ADDITIVE", { isDeleted: true }),
+        tax("TAX_AWAY", "Away", "ADDITIVE", { presentAtAllLocations: false, presentAtLocationIds: ["LOC_OTHER"] }),
+        item("I_A", "A", [variation("V_A")], { taxIds: ["TAX_OFF", "TAX_DEL", "TAX_AWAY"] }),
+      ],
+      LOC,
+    );
+    expect(quiet.taxWarning).toBeNull();
+
+    const many = mapCatalog(
+      [tax("TAX_ADD", "Sales tax", "ADDITIVE"), ...Array.from({ length: 12 }, (_, i) => item(`I_${i}`, `Item ${String(i).padStart(2, "0")}`, [variation(`V_${i}`)], { taxIds: ["TAX_ADD"] }))],
+      LOC,
+    );
+    expect(many.taxWarning).toMatch(/^12 items have Sales tax added on top of the price in Square: Item 00, Item 01, Item 02 and 9 more\./);
+    expect(many.taxWarning?.length).toBeLessThanOrEqual(300);
+  });
+
+  it("sync stores barcode, SKU and the tracking flag, rewrites a row only when one changes, and keeps the count", async () => {
+    h.catalog.objects = [item("I_A", "Coke", [variation("V_A", { data: { upc: "9300675024235", sku: "COKE", trackInventory: true } })])];
+    await syncProducts();
+    const rows = () =>
+      h.sql<{ barcode: string | null; sku: string | null; tracked: boolean; stock_count: number | null; updated_at: Date }[]>`
+        select barcode, sku, tracked, stock_count, updated_at from public.products where id = 'V_A'`;
+    const [first] = await rows();
+    expect(first).toMatchObject({ barcode: "9300675024235", sku: "COKE", tracked: true, stock_count: null });
+
+    await h.raw(null, `update public.products set stock_count = 7, stock_at = now() where id = 'V_A'`);
+    const [counted] = await rows();
+    await syncProducts();
+    const [again] = await rows();
+    expect(again.updated_at.getTime()).toBe(counted.updated_at.getTime());
+    expect(again.stock_count).toBe(7);
+
+    h.catalog.objects = [item("I_A", "Coke", [variation("V_A", { data: { upc: "9300675024242", trackInventory: false } })])];
+    await syncProducts();
+    const [changed] = await rows();
+    // The catalogue refresh never touches the count: that belongs to the stock read.
+    expect(changed).toMatchObject({ barcode: "9300675024242", sku: null, tracked: false, stock_count: 7 });
+  });
+
+  it("sync stamps tracked_since when tracking switches on, keeps it when it switches off, and stamps again on the next switch on", async () => {
+    const since = async () => (await h.sql<{ tracked_since: Date | null }[]>`select tracked_since from public.products where id = 'V_A'`)[0].tracked_since;
+    const set = (tracked: boolean) => {
+      h.catalog.objects = [item("I_A", "Coke", [variation("V_A", { data: { trackInventory: tracked } })])];
+      return syncProducts();
+    };
+    await set(false);
+    expect(await since()).toBeNull();
+
+    await set(true);
+    const first = await since();
+    expect(first).toBeInstanceOf(Date);
+    await h.raw(null, `update public.products set tracked_since = '2020-01-01' where id = 'V_A'`);
+    await set(true); // nothing changed: not rewritten
+    expect((await since())?.getFullYear()).toBe(2020);
+
+    await set(false);
+    expect((await since())?.getFullYear()).toBe(2020);
+    await set(true);
+    expect((await since())?.getFullYear()).toBeGreaterThan(2020);
+
+    // A new item that arrives already tracked.
+    h.catalog.objects = [item("I_B", "Pepsi", [variation("V_B", { data: { trackInventory: true } })])];
+    await syncProducts();
+    expect((await h.sql<{ tracked_since: Date | null }[]>`select tracked_since from public.products where id = 'V_B'`)[0].tracked_since).toBeInstanceOf(Date);
+  });
+
+  it("sync records the tax warning and clears it once the catalogue is fixed", async () => {
+    const warning = async () => (await h.sql<{ tax_warning: string | null }[]>`select tax_warning from public.catalog_state`)[0].tax_warning;
+    h.catalog.objects = [tax("TAX_ADD", "GST", "ADDITIVE"), item("I_A", "Coke", [variation("V_A")], { taxIds: ["TAX_ADD"] })];
+    await syncProducts();
+    expect(await warning()).toMatch(/^1 item has GST added on top/);
+    expect((await getAdminState(h.staff.manager)).catalog.taxWarning).toMatch(/Coke/);
+
+    h.catalog.objects = [tax("TAX_ADD", "GST", "INCLUSIVE"), item("I_A", "Coke", [variation("V_A")], { taxIds: ["TAX_ADD"] })];
+    await syncProducts();
+    expect(await warning()).toBeNull();
+  });
+
+  it("the floor and admin lists carry the barcode", async () => {
+    h.catalog.objects = [item("I_A", "Coke", [variation("V_A", { data: { upc: "9300675024235", sku: "COKE", trackInventory: true } })])];
+    await syncProducts();
+    expect((await getFloor()).products[0]).toMatchObject({ id: "V_A", barcode: "9300675024235", stock: null });
+    expect((await getAdminState(h.staff.manager)).catalog.products[0]).toMatchObject({ barcode: "9300675024235", sku: "COKE", tracked: true });
   });
 });
