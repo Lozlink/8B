@@ -1,7 +1,7 @@
 "use client";
 
 import Image from "next/image";
-import { useEffect, useRef, type ButtonHTMLAttributes, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ButtonHTMLAttributes, type ReactNode } from "react";
 
 // ---------------------------------------------------------------------------
 // Button
@@ -211,4 +211,25 @@ export function BrandLogo({ height = 96, priority = false }: { height?: number; 
   // The file is 1400 × 544.
   const width = Math.round((height * 1400) / 544);
   return <Image src="/brand/logo-on-dark.png" alt="8 Ball Lounge" width={width} height={height} priority={priority} className="h-auto max-w-full" />;
+}
+
+/**
+ * An item's picture from Square, as a square thumbnail. Decorative: the item's name is always
+ * beside it. Square serves the full-size original, so it goes through the image resizer. A
+ * picture that fails to load takes no space rather than showing a broken frame.
+ */
+export function ProductImage({ src, size }: { src: string; size: number }) {
+  const [failed, setFailed] = useState<string | null>(null);
+  if (failed === src) return null;
+  return (
+    <Image
+      src={src}
+      alt=""
+      width={size}
+      height={size}
+      onError={() => setFailed(src)}
+      className="shrink-0 rounded-lg bg-white object-contain"
+      style={{ width: size, height: size }}
+    />
+  );
 }

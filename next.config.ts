@@ -11,6 +11,15 @@ const securityHeaders = [
 const nextConfig: NextConfig = {
   cacheComponents: true,
   partialPrefetching: true,
+  images: {
+    // Item pictures from the Square catalogue (lib/square/catalog.ts keeps to the same hosts).
+    remotePatterns: [
+      { protocol: "https", hostname: "items-images-production.s3.us-west-2.amazonaws.com", pathname: "/files/**", search: "" },
+      { protocol: "https", hostname: "items-images-sandbox.s3.us-west-2.amazonaws.com", pathname: "/files/**", search: "" },
+    ],
+    // A picture in Square never changes at its URL (a new upload gets a new one), so keep resized copies a month.
+    minimumCacheTTL: 2_592_000,
+  },
   turbopack: {
     rules: {
       "*.css": {

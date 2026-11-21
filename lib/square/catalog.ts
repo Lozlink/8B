@@ -2,11 +2,11 @@ import "server-only";
 import type { Square } from "square";
 import { square, toUpstreamError } from "./client";
 
-/** Reads every ITEM, CATEGORY, DISCOUNT and TAX object in the catalogue (all pages). Variations come nested in their item. */
+/** Reads every ITEM, CATEGORY, DISCOUNT, TAX and IMAGE object in the catalogue (all pages). Variations come nested in their item. */
 export async function listCatalogObjects(): Promise<Square.CatalogObject[]> {
   try {
     const out: Square.CatalogObject[] = [];
-    const page = await square().catalog.list({ types: "ITEM,CATEGORY,DISCOUNT,TAX" });
+    const page = await square().catalog.list({ types: "ITEM,CATEGORY,DISCOUNT,TAX,IMAGE" });
     for await (const obj of page) out.push(obj);
     return out;
   } catch (e) {
@@ -28,6 +28,8 @@ export interface CatalogProduct {
   sku: string | null;
   /** Square tracks stock for this variation at our location. */
   tracked: boolean;
+  /** The variation's own picture in Square, else the item's first one. Null if it has none. */
+  imageUrl: string | null;
   sortOrder: number;
 }
 
@@ -61,6 +63,19 @@ const PRICE_MAX = 1_000_000; // products.price_cents check constraint
 const DISCOUNT_NAME_MAX = 60; // discounts.name / sessions.discount_name check constraint
 const DISCOUNT_AMOUNT_MAX = 1_000_000; // $10,000: more than any bill here; keeps the integer column safe
 const SKU_MAX = 120; // products.sku check constraint
+const IMAGE_URL_MAX = 500; // products.image_url check constraint
+
+/**
+ * Where Square keeps catalogue pictures. next.config.ts allows the same hosts for image resizing;
+ * a URL from anywhere else is left out rather than shown as a broken picture.
+ */
+const IMAGE_URL_RE = /^https:\/\/items-images-(?:production|sandbox)\.s3\.us-west-2\.amazonaws\.com\/[\w\-./]+$/;
+
+/** An IMAGE object's URL if it is one the app can show, else null. */
+export function toImageUrl(url: string | null | undefined): string | null {
+  const u = (url ?? "").trim();
+  return u.length <= IMAGE_URL_MAX && IMAGE_URL_RE.test(u) ? u : null;
+}
 
 /**
  * Square's `upc` as a barcode staff can scan: spaces and hyphens dropped, 6 to 14 digits (the
@@ -92,6 +107,7 @@ interface Variation {
   barcode: string | null;
   sku: string | null;
   tracked: boolean;
+  imageIds: readonly string[];
 }
 
 /** The item's variations that can be sold at this location, with any per-location price applied. */
@@ -115,6 +131,7 @@ function variationsAt(item: Square.CatalogObject.Item, locationId: string): Vari
       sku: (d.sku ?? "").trim().slice(0, SKU_MAX).trim() || null,
       // The location's own setting wins; unset at both levels means stock isn't tracked.
       tracked: (override?.trackInventory ?? d.trackInventory) === true,
+      imageIds: d.imageIds ?? [],
     });
   }
   return out;
@@ -209,6 +226,21 @@ export function mapCatalog(objects: readonly Square.CatalogObject[], locationId:
     if (name) categoryNames.set(o.id, name);
   }
 
+  const imageUrls = new Map<string, string>();
+  for (const o of objects) {
+    if (o.type !== "IMAGE" || !o.id || o.isDeleted) continue;
+    const url = toImageUrl(o.imageData?.url);
+    if (url) imageUrls.set(o.id, url);
+  }
+  // The first picture that still exists: Square POS shows the first one on an item too.
+  const firstImage = (ids: readonly string[] | null | undefined): string | null => {
+    for (const id of ids ?? []) {
+      const url = imageUrls.get(id);
+      if (url) return url;
+    }
+    return null;
+  };
+
   // Taxes that are added on top of the price here. GST in Australia is set up as included in the
   // price; one of these on an item means Square would charge more than the bill says.
   const additiveTaxes = new Map<string, string>();
@@ -275,6 +307,7 @@ export function mapCatalog(objects: readonly Square.CatalogObject[], locationId:
         barcode: v.barcode,
         sku: v.sku,
         tracked: v.tracked,
+        imageUrl: firstImage(v.imageIds) ?? firstImage(item.imageIds),
       });
     }
   }

@@ -4,7 +4,7 @@ import { memo, useCallback, useEffect, useMemo, useRef, useState, type KeyboardE
 import { useRouter } from "next/navigation";
 import { CustomCharge } from "@/components/custom-charge";
 import { useToast } from "@/components/toast";
-import { Button, Sheet, inputClass } from "@/components/ui";
+import { Button, ProductImage, Sheet, inputClass } from "@/components/ui";
 import { api, ApiError } from "@/lib/client/api";
 import { billCan, lineLabel } from "@/lib/client/bill-view";
 import { findByBarcode, normaliseBarcode } from "@/lib/client/barcode";
@@ -345,16 +345,19 @@ const ProductButton = memo(function ProductButton({ product: p, label, disabled,
         aria-busy={adding}
         aria-label={`Add ${p.name}, ${formatCents(p.priceCents)}${p.taxed ? "" : ", GST-free"}${stock ? `, ${stock.text.toLowerCase()}` : ""}`}
         onClick={() => onAdd(p.id)}
-        className="flex min-h-20 w-full select-none flex-col items-start justify-between gap-1 rounded-xl border border-line bg-surface-2 px-4 py-3 text-left transition-colors active:bg-line disabled:cursor-not-allowed disabled:opacity-45"
+        className="flex min-h-20 w-full select-none items-center gap-3 rounded-xl border border-line bg-surface-2 px-3 py-3 text-left transition-colors active:bg-line disabled:cursor-not-allowed disabled:opacity-45"
       >
-        <span className="line-clamp-2 text-base font-semibold leading-snug">{label}</span>
-        <span className="flex flex-wrap items-baseline gap-x-2 text-base tabular-nums text-muted">
-          {adding ? "Adding…" : formatCents(p.priceCents)}
-          {!adding && !p.taxed ? <span className="text-sm">GST-free</span> : null}
+        {p.imageUrl ? <ProductImage src={p.imageUrl} size={56} /> : null}
+        <span className="flex min-w-0 flex-1 flex-col items-start justify-between gap-1 self-stretch">
+          <span className="line-clamp-2 text-base font-semibold leading-snug">{label}</span>
+          <span className="flex flex-wrap items-baseline gap-x-2 text-base tabular-nums text-muted">
+            {adding ? "Adding…" : formatCents(p.priceCents)}
+            {!adding && !p.taxed ? <span className="text-sm">GST-free</span> : null}
+          </span>
+          {stock && !adding ? (
+            <span className={`text-sm font-semibold ${stock.tone === "out" ? "text-danger-text" : "text-warn"}`}>{stock.text}</span>
+          ) : null}
         </span>
-        {stock && !adding ? (
-          <span className={`text-sm font-semibold ${stock.tone === "out" ? "text-danger-text" : "text-warn"}`}>{stock.text}</span>
-        ) : null}
       </button>
     </li>
   );

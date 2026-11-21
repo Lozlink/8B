@@ -211,6 +211,8 @@ export interface ProductRow {
   /** Square's IN_STOCK count; null = not tracked or never counted. */
   stock_count: number | null;
   stock_at: Date | null;
+  /** The item's picture in Square. */
+  image_url: string | null;
 }
 
 export interface CatalogStateRow {
@@ -328,7 +330,7 @@ export async function cashHandoffInProgress(q: Db, sessionId: string): Promise<D
 
 export async function getProducts(q: Db, opts: { activeOnly: boolean }): Promise<ProductRow[]> {
   return q<ProductRow[]>`
-    select id, item_id, name, price_cents, taxed, category, sort_order, active, barcode, sku, tracked, stock_count, stock_at
+    select id, item_id, name, price_cents, taxed, category, sort_order, active, barcode, sku, tracked, stock_count, stock_at, image_url
     from public.products
     where ${opts.activeOnly ? q`active` : q`true`}
     order by sort_order, name, id`;

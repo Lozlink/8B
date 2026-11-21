@@ -114,8 +114,8 @@ describe("C1. catalogue mapping", () => {
       LOC,
     );
     expect(products).toEqual([
-      { id: "V_COKE", itemId: "I_COKE", name: "Coke", priceCents: 450, taxed: true, category: "Drinks", barcode: null, sku: null, tracked: false, sortOrder: 0 },
-      { id: "V_CHIPS", itemId: "I_CHIPS", name: "Chips", priceCents: 600, taxed: true, category: "Snacks", barcode: null, sku: null, tracked: false, sortOrder: 1 },
+      { id: "V_COKE", itemId: "I_COKE", name: "Coke", priceCents: 450, taxed: true, category: "Drinks", barcode: null, sku: null, tracked: false, imageUrl: null, sortOrder: 0 },
+      { id: "V_CHIPS", itemId: "I_CHIPS", name: "Chips", priceCents: 600, taxed: true, category: "Snacks", barcode: null, sku: null, tracked: false, imageUrl: null, sortOrder: 1 },
     ]);
     // plain numbers, safe to JSON.stringify (the SDK hands back bigint)
     expect(() => JSON.stringify(products)).not.toThrow();
@@ -227,6 +227,36 @@ describe("C1. catalogue mapping", () => {
     expect(products.map((p) => [p.id, p.priceCents])).toEqual([["V_COKE", 500]]);
   });
 
+  it("takes the variation's own picture, else the item's first that still exists; odd URLs are left out", () => {
+    const img = (id: string, url: string, deleted = false): Square.CatalogObject.Image => ({
+      type: "IMAGE",
+      id,
+      isDeleted: deleted,
+      imageData: { url },
+    });
+    const S3 = "https://items-images-production.s3.us-west-2.amazonaws.com/files";
+    const { products } = mapCatalog(
+      [
+        img("IMG_ITEM", `${S3}/aaa/original.jpeg`),
+        img("IMG_VAR", `${S3}/bbb/original.png`),
+        img("IMG_GONE", `${S3}/ccc/original.jpeg`, true),
+        img("IMG_ELSEWHERE", "https://example.com/evil.jpeg"),
+        item("I_COKE", "Coke", [variation("V_CAN", { name: "Can" }), variation("V_BOTTLE", { name: "Bottle", data: { imageIds: ["IMG_VAR"] } })], {
+          data: { imageIds: ["IMG_GONE", "IMG_ITEM"] },
+        }),
+        item("I_PIE", "Pie", [variation("V_PIE")], { data: { imageIds: ["IMG_ELSEWHERE", "IMG_MISSING"] } }),
+        item("I_WATER", "Water", [variation("V_WATER")]),
+      ],
+      LOC,
+    );
+    expect(Object.fromEntries(products.map((p) => [p.id, p.imageUrl]))).toEqual({
+      V_CAN: `${S3}/aaa/original.jpeg`,
+      V_BOTTLE: `${S3}/bbb/original.png`,
+      V_PIE: null,
+      V_WATER: null,
+    });
+  });
+
   it("finds the Table hire variation: name match is trimmed and case-insensitive, and it must be variable-price here", () => {
     const hire = (name: string, vars: Square.CatalogObject.ItemVariation[], o: ItemOpts = {}) => item("I_HIRE", name, vars, o);
     const open = variation("V_HIRE", { pricing: "VARIABLE_PRICING" });
@@ -289,6 +319,32 @@ describe("C2. syncProducts", () => {
     expect(water.updated_at).toEqual(old);
     // Table hire left the catalogue → unlinked
     expect((await state()).table_hire_variation_id).toBeNull();
+  });
+
+  it("a picture added, changed or removed in Square follows through on the next sync", async () => {
+    const url = (n: string) => `https://items-images-production.s3.us-west-2.amazonaws.com/files/${n}/original.jpeg`;
+    const withImage = (n: string | null): Square.CatalogObject[] => [
+      ...(n ? [{ type: "IMAGE", id: "IMG_1", imageData: { url: url(n) } } satisfies Square.CatalogObject.Image] : []),
+      item("I_COKE", "Coke", [variation("V_COKE")], { data: { imageIds: n ? ["IMG_1"] : [] } }),
+    ];
+    const image = async () => (await h.sql<{ image_url: string | null }[]>`select image_url from public.products where id = 'V_COKE'`)[0]?.image_url;
+
+    h.catalog.objects = withImage(null);
+    await syncProducts();
+    expect(await image()).toBeNull();
+
+    h.catalog.objects = withImage("one");
+    await syncProducts();
+    expect(await image()).toBe(url("one"));
+    expect((await getFloor()).products[0]).toMatchObject({ id: "V_COKE", imageUrl: url("one") });
+
+    h.catalog.objects = withImage("two");
+    await syncProducts();
+    expect(await image()).toBe(url("two"));
+
+    h.catalog.objects = withImage(null);
+    await syncProducts();
+    expect(await image()).toBeNull();
   });
 
   it("items that leave Square are marked inactive, never deleted, and come back if they return", async () => {
@@ -505,9 +561,9 @@ describe("C4. DTOs", () => {
 
     const f = await getFloor();
     expect(f.products).toEqual([
-      { id: "VAR_COKE", name: "Coke", priceCents: 450, taxed: true, category: "Drinks", barcode: null, stock: null },
-      { id: "VAR_WATER", name: "Water", priceCents: 300, taxed: false, category: "Drinks", barcode: null, stock: null },
-      { id: "VAR_CHIPS", name: "Chips", priceCents: 600, taxed: true, category: null, barcode: null, stock: null },
+      { id: "VAR_COKE", name: "Coke", priceCents: 450, taxed: true, category: "Drinks", barcode: null, imageUrl: null, stock: null },
+      { id: "VAR_WATER", name: "Water", priceCents: 300, taxed: false, category: "Drinks", barcode: null, imageUrl: null, stock: null },
+      { id: "VAR_CHIPS", name: "Chips", priceCents: 600, taxed: true, category: null, barcode: null, imageUrl: null, stock: null },
     ]);
     const sa = f.sessions.find((s) => s.id === a);
     expect(sa).toMatchObject({ itemsCents: 1200, totalCents: null });
@@ -647,10 +703,10 @@ describe("C4. DTOs", () => {
     let s = await getAdminState(h.staff.manager);
     expect(s.catalog).toEqual({
       products: [
-        { id: "VAR_COKE", name: "Coke", priceCents: 450, taxed: true, category: "Drinks", active: true, barcode: null, stock: null, sku: null, tracked: false },
-        { id: "VAR_WATER", name: "Water", priceCents: 300, taxed: false, category: "Drinks", active: true, barcode: null, stock: null, sku: null, tracked: false },
-        { id: "VAR_CHIPS", name: "Chips", priceCents: 600, taxed: true, category: null, active: true, barcode: null, stock: null, sku: null, tracked: false },
-        { id: "VAR_OLD", name: "Old pie", priceCents: 500, taxed: true, category: null, active: false, barcode: null, stock: null, sku: null, tracked: false },
+        { id: "VAR_COKE", name: "Coke", priceCents: 450, taxed: true, category: "Drinks", active: true, barcode: null, imageUrl: null, stock: null, sku: null, tracked: false },
+        { id: "VAR_WATER", name: "Water", priceCents: 300, taxed: false, category: "Drinks", active: true, barcode: null, imageUrl: null, stock: null, sku: null, tracked: false },
+        { id: "VAR_CHIPS", name: "Chips", priceCents: 600, taxed: true, category: null, active: true, barcode: null, imageUrl: null, stock: null, sku: null, tracked: false },
+        { id: "VAR_OLD", name: "Old pie", priceCents: 500, taxed: true, category: null, active: false, barcode: null, imageUrl: null, stock: null, sku: null, tracked: false },
       ],
       discounts: [],
       syncedAt: null,

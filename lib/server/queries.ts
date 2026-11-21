@@ -156,6 +156,7 @@ export function productDTO(p: ProductRow, held = 0): ProductDTO {
     taxed: p.taxed,
     category: p.category,
     barcode: p.barcode,
+    imageUrl: p.image_url,
     stock: p.tracked && p.stock_count !== null ? p.stock_count - held : null,
   };
 }

@@ -42,7 +42,7 @@ export async function syncProducts(): Promise<number> {
       // the same new product.
       await tx`select 1 from public.catalog_state where id for update`;
       const existing = await tx<ProductRow[]>`
-        select id, item_id, name, price_cents, taxed, category, sort_order, active, barcode, sku, tracked, stock_count, stock_at
+        select id, item_id, name, price_cents, taxed, category, sort_order, active, barcode, sku, tracked, stock_count, stock_at, image_url
         from public.products`;
       const current = new Map(existing.map((r) => [r.id, r]));
 
@@ -51,9 +51,9 @@ export async function syncProducts(): Promise<number> {
         current.delete(p.id);
         if (!row) {
           await tx`
-            insert into public.products (id, item_id, name, price_cents, taxed, category, sort_order, active, barcode, sku, tracked, tracked_since)
+            insert into public.products (id, item_id, name, price_cents, taxed, category, sort_order, active, barcode, sku, tracked, tracked_since, image_url)
             values (${p.id}, ${p.itemId}, ${p.name}, ${p.priceCents}, ${p.taxed}, ${p.category}, ${p.sortOrder}, true,
-                    ${p.barcode}, ${p.sku}, ${p.tracked}, case when ${p.tracked}::boolean then now() end)`;
+                    ${p.barcode}, ${p.sku}, ${p.tracked}, case when ${p.tracked}::boolean then now() end, ${p.imageUrl})`;
           continue;
         }
         const same =
@@ -66,7 +66,8 @@ export async function syncProducts(): Promise<number> {
           row.sort_order === p.sortOrder &&
           row.barcode === p.barcode &&
           row.sku === p.sku &&
-          row.tracked === p.tracked;
+          row.tracked === p.tracked &&
+          row.image_url === p.imageUrl;
         // Only rows that changed are written, so updated_at says when a price or name last moved.
         if (same) continue;
         // `tracked_since` is stamped when tracking switches on and left alone otherwise (switching off
@@ -76,7 +77,7 @@ export async function syncProducts(): Promise<number> {
           update public.products set
             item_id = ${p.itemId}, name = ${p.name}, price_cents = ${p.priceCents}, taxed = ${p.taxed},
             category = ${p.category}, sort_order = ${p.sortOrder}, active = true, synced_at = now(),
-            barcode = ${p.barcode}, sku = ${p.sku}, tracked = ${p.tracked},
+            barcode = ${p.barcode}, sku = ${p.sku}, tracked = ${p.tracked}, image_url = ${p.imageUrl},
             tracked_since = case when ${p.tracked}::boolean and not tracked then now() else tracked_since end
           where id = ${p.id}`;
       }

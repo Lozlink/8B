@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { usePathname, useRouter } from "next/navigation";
+import { usePathname } from "next/navigation";
 import type { ReactNode } from "react";
 import { BrandMark, Button } from "@/components/ui";
 import { api } from "@/lib/client/api";
@@ -46,7 +46,6 @@ function DegradedBanner() {
 
 function Chrome({ children }: { children: ReactNode }) {
   const pathname = usePathname();
-  const router = useRouter();
   const { me, unpaidCount, offline, degraded } = useFloor();
   const { run, pending } = useAction();
 
@@ -54,7 +53,8 @@ function Chrome({ children }: { children: ReactNode }) {
     void run(
       async () => {
         await api.logout();
-        router.replace("/login");
+        // Full load: drops every hidden page and its state along with the session (see LoginView).
+        window.location.replace("/login");
       },
       { refetch: false },
     );

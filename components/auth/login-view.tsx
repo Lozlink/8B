@@ -45,13 +45,29 @@ export function LoginView() {
     };
   }, [router]);
 
+  // Safari can bring this page back from its back/forward cache exactly as it was left: mid-login.
+  useEffect(() => {
+    const onShow = (e: PageTransitionEvent) => {
+      if (!e.persisted) return;
+      setPending(false);
+      setSelected(null);
+      setPin("");
+      setError(null);
+    };
+    window.addEventListener("pageshow", onShow);
+    return () => window.removeEventListener("pageshow", onShow);
+  }, []);
+
   const submit = async () => {
     if (!selected || pin.length < 4 || pending) return;
     setPending(true);
     setError(null);
     try {
       await api.login(selected.id, pin);
-      router.replace("/");
+      // A full load, not router.replace: with cacheComponents, pages left by a client-side navigation
+      // are hidden and keep their state. This screen would come back on "Switch user" still pending
+      // (every key disabled), and the floor would still show the previous person.
+      window.location.replace("/");
     } catch (e) {
       setError(errorMessage(e));
       setPin("");

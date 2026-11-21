@@ -3,7 +3,7 @@
 import { useMemo, useState } from "react";
 import { ActionDialog } from "@/components/action-dialog";
 import { useToast } from "@/components/toast";
-import { Button, Notice, inputClass } from "@/components/ui";
+import { Button, ProductImage, Notice, inputClass } from "@/components/ui";
 import { api } from "@/lib/client/api";
 import { discountWhat } from "@/lib/client/bill-view";
 import { isManagerRequired } from "@/lib/client/errors";
@@ -241,9 +241,10 @@ export function ItemsTab({ state, reload, onError }: TabProps) {
               {products.map((p) => (
                 <li
                   key={p.id}
-                  className={`flex items-start justify-between gap-3 rounded-2xl border border-line bg-surface p-4 ${p.active ? "" : "opacity-60"}`}
+                  className={`flex items-start gap-3 rounded-2xl border border-line bg-surface p-4 ${p.active ? "" : "opacity-60"}`}
                 >
-                  <div className="min-w-0">
+                  {p.imageUrl ? <ProductImage src={p.imageUrl} size={56} /> : null}
+                  <div className="min-w-0 flex-1">
                     <p className="flex flex-wrap items-center gap-x-3 gap-y-1 text-lg font-semibold">
                       <span className="min-w-0 break-words">{p.name}</span>
                       {!p.taxed ? (
