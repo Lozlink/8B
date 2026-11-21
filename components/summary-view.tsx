@@ -13,7 +13,7 @@ import { useLoad } from "@/lib/client/use-load";
 import { authRedirect, errorMessage } from "@/lib/client/errors";
 import { useFloor } from "@/lib/client/floor-context";
 import { REOPENED_TOAST, REOPEN_SUBMIT, REOPEN_TITLE, attentionTitle, reopenBlurb } from "@/lib/client/refund-view";
-import type { SummaryDTO, SummarySessionRow } from "@/lib/domain/types";
+import type { AttentionEntryDTO, SummaryDTO, SummarySessionRow } from "@/lib/domain/types";
 import { formatDateTime, formatTime } from "@/lib/format";
 import { formatCents } from "@/lib/pricing";
 
@@ -29,6 +29,7 @@ export function SummaryView() {
   const [error, setError] = useState<string | null>(null);
   const [detailId, setDetailId] = useState<string | null>(null);
   const [reversing, setReversing] = useState<PaidItem | null>(null);
+  const [checking, setChecking] = useState<AttentionEntryDTO | null>(null);
 
   const seq = useRef(0);
 
@@ -57,6 +58,9 @@ export function SummaryView() {
     const id = setInterval(() => void load(), 30_000);
     return () => clearInterval(id);
   }, [outstanding, load]);
+
+  const toCheck = data?.attention.filter((a) => !a.checked) ?? [];
+  const checked = data?.attention.filter((a) => a.checked) ?? [];
 
   const dur = (m: number) => `${Math.floor(m / 60)}h ${m % 60}m`;
 
@@ -139,28 +143,47 @@ export function SummaryView() {
             </Notice>
           ) : null}
 
-          {data.attention.length > 0 ? (
+          {toCheck.length > 0 ? (
             <section aria-label="Needs attention" className="flex flex-col gap-2">
-              <h2 className="text-xl font-semibold text-warn">Needs attention</h2>
+              <h2 className="text-xl font-semibold text-warn">Needs attention ({toCheck.length})</h2>
               <ul className="flex flex-col gap-2">
-                {data.attention.map((a) => (
+                {toCheck.map((a) => (
                   <li key={a.id} className="rounded-xl border border-[#c18a22] bg-[#33260a] px-4 py-3">
-                    <p className="font-semibold">{attentionTitle(a.action)}</p>
-                    <p className="text-sm text-muted tabular-nums">
-                      {formatDateTime(a.at, tz)}
-                      {a.actorName ? ` · ${a.actorName}` : ""}
-                      {a.deviceLabel ? ` · ${a.deviceLabel}` : ""}
-                    </p>
-                    {a.reason ? <p>{a.reason}</p> : null}
-                    {a.entity === "session" && a.entityId ? (
-                      <Button className="mt-2" onClick={() => setDetailId(a.entityId)}>
-                        Open session
+                    <AttentionText entry={a} tz={tz} />
+                    <div className="mt-2 flex flex-wrap gap-2">
+                      {a.entity === "session" && a.entityId ? <Button onClick={() => setDetailId(a.entityId)}>Open bill</Button> : null}
+                      <Button onClick={() => setChecking(a)} disabled={error !== null}>
+                        Mark as checked
                       </Button>
-                    ) : null}
+                    </div>
                   </li>
                 ))}
               </ul>
             </section>
+          ) : null}
+
+          {checked.length > 0 ? (
+            <details className="rounded-xl border border-line bg-surface">
+              <summary className="flex min-h-12 cursor-pointer select-none items-center px-4 py-2 text-base font-semibold">
+                Checked ({checked.length})
+              </summary>
+              <ul className="divide-y divide-line border-t border-line">
+                {checked.map((a) => (
+                  <li key={a.id} className="flex flex-wrap items-start justify-between gap-x-4 gap-y-2 px-4 py-3">
+                    <div className="min-w-0">
+                      <AttentionText entry={a} tz={tz} />
+                      {a.checked ? (
+                        <p className="text-sm text-muted tabular-nums">
+                          Checked {formatDateTime(a.checked.at, tz)}
+                          {a.checked.byName ? ` by ${a.checked.byName}` : ""}
+                        </p>
+                      ) : null}
+                    </div>
+                    {a.entity === "session" && a.entityId ? <Button onClick={() => setDetailId(a.entityId)}>Open bill</Button> : null}
+                  </li>
+                ))}
+              </ul>
+            </details>
           ) : null}
 
           <List title="Unpaid in this window" empty="None." rows={data.unpaid.items} tz={tz} onOpen={setDetailId} />
@@ -259,6 +282,24 @@ export function SummaryView() {
 
       {detailId ? <SessionDetailSheet sessionId={detailId} onClose={() => { setDetailId(null); void load(); }} /> : null}
 
+      {checking ? (
+        <ActionDialog
+          title={`Mark as checked: ${attentionTitle(checking.action)}`}
+          description="Use this once you have looked into it and nothing more needs doing. It moves to the Checked list with your name against it."
+          requirePin
+          noReason
+          submitLabel="Mark as checked"
+          onClose={() => {
+            setChecking(null);
+            void load(); // also after a refusal: someone else may have just checked it
+          }}
+          onSubmit={async ({ pin }) => {
+            await api.checkAttention(checking.id, pin);
+            toast.show("Marked as checked.", "success");
+          }}
+        />
+      ) : null}
+
       {reversing ? (
         <ActionDialog
           title={`${REOPEN_TITLE}: ${reversing.tableNames}`}
@@ -276,6 +317,20 @@ export function SummaryView() {
         />
       ) : null}
     </div>
+  );
+}
+
+function AttentionText({ entry: a, tz }: { entry: AttentionEntryDTO; tz: string }) {
+  return (
+    <>
+      <p className="font-semibold">{attentionTitle(a.action)}</p>
+      <p className="text-sm text-muted tabular-nums">
+        {formatDateTime(a.at, tz)}
+        {a.actorName ? ` · ${a.actorName}` : ""}
+        {a.deviceLabel ? ` · ${a.deviceLabel}` : ""}
+      </p>
+      {a.reason ? <p className="break-words">{a.reason}</p> : null}
+    </>
   );
 }
 

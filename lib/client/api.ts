@@ -133,6 +133,14 @@ export const api = {
   transfer: (id: string, tableId: string) => post<{ ok: true }>(`/api/sessions/${enc(id)}/transfer`, { tableId }),
   stop: (id: string) =>
     post<{ status: "awaiting_payment" | "void"; billedMinutes: number; totalCents: number }>(`/api/sessions/${enc(id)}/stop`),
+  /**
+   * "Keep playing": a stopped table (awaiting payment, still on its table) goes back to running.
+   * Its items and discount stay; the bill is worked out again at the next stop.
+   *   countGap true  — stopped by mistake: the time since the stop is charged.
+   *   countGap false — the clock starts again now; the time in between is not charged.
+   * 409 if the bill has left its table, has been split, or a card request or Square POS cash sale is live.
+   */
+  continueSession: (id: string, countGap: boolean) => post<{ ok: true }>(`/api/sessions/${enc(id)}/continue`, { countGap }),
   /** "Leave unpaid": frees the table, bill goes to the unpaid list. */
   release: (id: string) => post<{ ok: true }>(`/api/sessions/${enc(id)}/release`),
 
@@ -286,6 +294,13 @@ export const api = {
   // --- reporting --------------------------------------------------------------
   /** date = local business date YYYY-MM-DD; omit for the current business day. */
   summary: (date?: string) => get<SummaryDTO>(`/api/summary${date ? `?date=${enc(date)}` : ""}`),
+
+  /**
+   * A manager marks a summary "Needs attention" entry (`AttentionEntryDTO.id`) as checked. It only
+   * clears the notice. 409 if someone already has; refetch the summary either way.
+   */
+  checkAttention: (entryId: string, managerPin: string) =>
+    post<{ ok: true }>("/api/summary/attention", { entryId, managerPin }),
 
   // --- admin (requires elevation cookie from adminElevate) -------------------
   adminElevate: (pin: string) =>

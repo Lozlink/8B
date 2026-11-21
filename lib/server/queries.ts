@@ -1,4 +1,5 @@
 import "server-only";
+import { ATTENTION_ACTIONS, attentionChecks } from "./attention";
 import type {
   AuditEntryDTO,
   BillKind,
@@ -594,21 +595,9 @@ export async function getSummary(dateParam: string | null): Promise<SummaryDTO> 
         and not (s.kind = 'counter' and coalesce(s.total_cents, 0) = 0 and s.items_cents = 0
                  and coalesce(s.void_reason, '') = ${DISCARD_REASON})
       order by s.voided_at, s.id`,
-    getAudit({ from, to, actions: [
-        "payment.conflict",
-        "session.reverse_paid",
-        "checkout.cancel_failed",
-        "square.cash_failed",
-        // Stock Square wasn't told about (or wasn't given back) after a sale or a reopened bill.
-        "square.stock_failed",
-        // Cash handed to Square POS that nobody could confirm: Square may hold the sale twice.
-        "cash.handoff_unconfirmed",
-        "cash.handoff_check_skipped",
-        // A refund Square refused (nothing went back), and one nobody can confirm either way.
-        "refund.failed",
-        "refund.unconfirmed",
-      ], limit: 200 }),
+    getAudit({ from, to, actions: [...ATTENTION_ACTIONS], limit: 200 }),
   ]);
+  const checks = await attentionChecks(q, attention.entries.map((a) => a.id));
 
   // Refunds asked for in the window; refunds nobody can confirm, whatever day they are from; and
   // for each bill paid in the window, what has been refunded, what still can be, and whether its
@@ -698,6 +687,9 @@ export async function getSummary(dateParam: string | null): Promise<SummaryDTO> 
       count: voids.length,
       items: voids.map((v) => ({ ...row(v), reason: v.void_reason, voidedByName: v.voided_by_name })),
     },
-    attention: attention.entries,
+    attention: attention.entries.map((a) => {
+      const c = checks.get(a.id);
+      return { ...a, checked: c ? { at: c.at.toISOString(), byName: c.byName } : null };
+    }),
   };
 }

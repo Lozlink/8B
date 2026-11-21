@@ -456,6 +456,70 @@ export async function stopSession(actor: Actor, id: string, now = new Date()): P
   });
 }
 
+/**
+ * "Keep playing": a stopped table goes back to running, as if Stop had not been the end of it.
+ * The bill worked out at Stop is thrown away (it is worked out again at the next Stop); the items
+ * and any discount stay on it.
+ *
+ *   countGap true  — stopped by mistake: the clock carries on from the moment it was stopped, so
+ *                    the time since is charged.
+ *   countGap false — they came back for more: the clock starts again now, and the time in between
+ *                    is not charged (the same as a pause).
+ *
+ * Only while the bill is still on its table: once it has been left unpaid the table may have been
+ * given to someone else, and that bill is paid as it stands. Not once any of it has been split
+ * off, and not while a card request or a Square POS cash sale could still take the old amount.
+ */
+export async function continueSession(actor: Actor, id: string, opts: { countGap: boolean }, now = new Date()): Promise<void> {
+  await withTx(async (tx) => {
+    const s = await mustLock(tx, id);
+    assertCan(s.status, "continue");
+    if (s.kind !== "table") throw conflict("Only a table's bill can go back to running.");
+    if (!s.current_table_id || !s.closed_at) {
+      throw conflict("This bill has left its table, so it can't go back to running. Start the table again and take this bill as it is.");
+    }
+    const [part] = await tx<{ id: string }[]>`select id from public.sessions where split_of = ${id} and not merged limit 1`;
+    if (part || s.split_off_cents !== 0) throw conflict("This bill has been split, so it can't go back to running.");
+    if ((await getCheckouts(tx, id)).some((c) => isCheckoutLive(c.status))) {
+      throw conflict("Cancel the card request on the Terminal first.");
+    }
+    await refuseDuringCashHandoff(tx, s);
+
+    // The clock: carry on the interval Stop closed, or open a new one.
+    const intervals = await getIntervals(tx, id);
+    const last = intervals[intervals.length - 1];
+    const lastEnd = last?.ended_at ?? null;
+    let startedAt: Date;
+    if (opts.countGap && last && lastEnd && lastEnd.getTime() >= s.closed_at.getTime()) {
+      // Running when it was stopped: that interval simply never ended.
+      await tx`update public.session_intervals set ended_at = null where id = ${last.id}`;
+      startedAt = last.started_at;
+    } else {
+      // Paused when it was stopped (count from the stop), or starting again from now. Never before
+      // the last interval ended: two intervals of one session can't overlap.
+      const from = opts.countGap ? s.closed_at : now;
+      startedAt = lastEnd && lastEnd.getTime() > from.getTime() ? lastEnd : from;
+      await tx`
+        insert into public.session_intervals (session_id, table_id, started_at)
+        values (${id}, ${s.current_table_id}, ${startedAt})`;
+    }
+
+    await tx`
+      update public.sessions set
+        status = 'running', closed_at = null, closed_by = null, billed_minutes = null, total_cents = null,
+        discount_cents = 0, rate_snapshot = null
+      where id = ${id}`;
+    await audit(tx, {
+      ...by(actor),
+      action: "session.continue",
+      entity: "session",
+      entityId: id,
+      before: auditView(s),
+      after: { status: "running", count_gap: opts.countGap, interval_started_at: startedAt, stopped_at: s.closed_at },
+    });
+  });
+}
+
 /** Frees the table; the bill stays awaiting payment on the unpaid list. */
 export async function releaseTable(actor: Actor, id: string): Promise<void> {
   await withTx(async (tx) => {

@@ -370,7 +370,13 @@ export interface SummaryDTO {
   unpaid: { count: number; cents: number; items: SummarySessionRow[] };
   outstandingOlder: { count: number; cents: number };
   voids: { count: number; items: (SummarySessionRow & { reason: string; voidedByName: string | null })[] };
-  attention: AuditEntryDTO[];
+  /** Flagged audit entries from the window, newest first: the ones still to look at and the ones a manager has checked. */
+  attention: AttentionEntryDTO[];
+}
+
+export interface AttentionEntryDTO extends AuditEntryDTO {
+  /** Set once a manager has marked the entry as checked. `at` is ISO. */
+  checked: { at: string; byName: string | null } | null;
 }
 
 export interface SummarySessionRow {

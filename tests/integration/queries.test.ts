@@ -346,5 +346,20 @@ describe("getSummary", () => {
     expect(actions).toContain("payment.conflict");
     expect(actions).toContain("session.reverse_paid");
     expect(sum.attention.find((a) => a.action === "payment.conflict")?.reason).toMatch(/cash/i);
+    expect(sum.attention.every((a) => a.checked === null)).toBe(true);
+
+    // A manager marks the reversal as checked: it stays listed, with who checked it.
+    const { checkAttention } = await import("@/lib/server/attention");
+    const reversal = sum.attention.find((a) => a.action === "session.reverse_paid");
+    if (!reversal) throw new Error("no reversal entry");
+    await checkAttention(actor, manager, reversal.id);
+    const after = await getSummary(date);
+    expect(after.attention.find((a) => a.id === reversal.id)?.checked).toMatchObject({ byName: manager.name });
+    expect(after.attention.filter((a) => a.checked).length).toBe(1);
+    // Once only, and only for entries that are on the list.
+    await expect(checkAttention(actor, manager, reversal.id)).rejects.toMatchObject({ status: 409 });
+    const [start] = await h.sql<{ id: string }[]>`select id::text as id from public.audit_log where action = 'session.start' limit 1`;
+    await expect(checkAttention(actor, manager, start.id)).rejects.toMatchObject({ status: 404 });
+    await expect(checkAttention(actor, manager, "999999999")).rejects.toMatchObject({ status: 404 });
   });
 });

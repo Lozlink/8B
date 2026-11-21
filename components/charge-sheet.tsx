@@ -19,7 +19,7 @@ import { useAction } from "@/lib/client/use-action";
 import { isCheckoutLive } from "@/lib/domain/machine";
 import type { SessionDetailDTO } from "@/lib/domain/types";
 import { formatCents } from "@/lib/pricing";
-import { billName, billOf, discountBase, groupItems, isEmptyCounterSale, lineLabel } from "@/lib/client/bill-view";
+import { billName, billOf, canContinue, discountBase, groupItems, isEmptyCounterSale, lineLabel } from "@/lib/client/bill-view";
 import { cashDueCents } from "@/lib/domain/bill";
 import { checkoutLabel } from "@/lib/client/session-view";
 import { inSplit, nextUnpaidBill, type NextBill } from "@/lib/client/split-view";
@@ -81,6 +81,7 @@ function ChargeSheetBody({
   const [loadError, setLoadError] = useState<string | null>(null);
   const [mode, setMode] = useState<"choose" | "cash">("choose");
   const [confirmCard, setConfirmCard] = useState(false);
+  const [continuing, setContinuing] = useState(false);
   const [alreadyCard, setAlreadyCard] = useState(false);
   const [warnings, setWarnings] = useState<string[]>([]);
   const [printing, setPrinting] = useState(false);
@@ -326,6 +327,19 @@ function ChargeSheetBody({
     if (d && d.session.status === "awaiting_payment" && !isCheckoutLive(d.session.checkout?.status)) setMode("cash");
   };
 
+  /** Back to running. `countGap`: charge the time since it was stopped (a stop by mistake) or not. */
+  const handleContinue = async (countGap: boolean) => {
+    const r = await run(() => api.continueSession(sessionId, countGap));
+    if (r) {
+      toast.show(`${session ? billName(session) : "Table"} is running again.`, "success");
+      onClose();
+    } else {
+      // Refused: the bill has moved on (paid, split, on the Terminal). Show it as it is now.
+      setContinuing(false);
+      await load();
+    }
+  };
+
   const handleRelease = async () => {
     const r = await run(() => api.release(sessionId));
     if (r) {
@@ -516,6 +530,11 @@ function ChargeSheetBody({
                   </Button>
                 </>
               )}
+              {session && canContinue(session) ? (
+                <Button size="lg" disabled={busy} onClick={() => setContinuing(true)}>
+                  Keep playing
+                </Button>
+              ) : null}
               {session?.currentTableId ? (
                 <Button size="lg" disabled={pending} onClick={() => void handleRelease()}>
                   Leave unpaid
@@ -552,6 +571,11 @@ function ChargeSheetBody({
                 {cashLabelCents !== null ? <span className="tabular-nums"> · {formatCents(cashLabelCents)}</span> : null}
               </Button>
               {session ? <SplitButton session={session} disabled={busy} onSplit={load} onBillChanged={setChangedNote} /> : null}
+              {session && canContinue(session) ? (
+                <Button size="lg" disabled={busy} onClick={() => setContinuing(true)}>
+                  Keep playing
+                </Button>
+              ) : null}
               {session?.currentTableId ? (
                 <Button size="lg" disabled={pending} onClick={() => void handleRelease()}>
                   Leave unpaid
@@ -564,6 +588,27 @@ function ChargeSheetBody({
           )}
         </div>
       )}
+
+      {continuing && session ? (
+        <Sheet title={`Keep playing on ${billName(session)}?`} onClose={() => setContinuing(false)} raised locked={pending}>
+          <div className="flex flex-col gap-4">
+            <p className="text-base text-muted">
+              The table goes back to running and this bill is worked out again when it is next stopped. Items and any discount stay on it.
+            </p>
+            <Button variant="primary" size="lg" className="h-auto min-h-16 flex-col gap-0.5 py-3" disabled={pending} onClick={() => void handleContinue(true)}>
+              <span>Stopped by mistake</span>
+              <span className="text-sm font-medium">The time since it was stopped is charged</span>
+            </Button>
+            <Button size="lg" className="h-auto min-h-16 flex-col gap-0.5 py-3" disabled={pending} onClick={() => void handleContinue(false)}>
+              <span>Start the clock from now</span>
+              <span className="text-sm font-medium text-muted">The time since it was stopped is not charged</span>
+            </Button>
+            <Button variant="ghost" disabled={pending} onClick={() => setContinuing(false)}>
+              Cancel
+            </Button>
+          </div>
+        </Sheet>
+      ) : null}
 
       {confirmCard ? (
         <CardConfirmDialog

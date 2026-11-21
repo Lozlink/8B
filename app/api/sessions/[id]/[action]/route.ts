@@ -17,6 +17,7 @@ import {
   removeDiscount,
   removeItem,
   resendCheckout,
+  continueSession,
   resumeSession,
   reversePaid,
   setDiscount,
@@ -36,6 +37,7 @@ import { refundSession, refundsInBackground, settleRefund } from "@/lib/server/r
 export const maxDuration = 60;
 
 const transferBody = z.object({ tableId: uuid });
+const continueBody = z.object({ countGap: z.boolean() });
 // What the screen showed as the bill's total when staff tapped. Optional: the release before this
 // one doesn't send it, and then the action goes ahead on whatever the bill is now. When it is sent
 // and the bill is no longer that amount, the action answers 409 `bill_changed` and does nothing.
@@ -93,6 +95,11 @@ export const POST = handler(async (req: Request, ctx: RouteContext<"/api/session
     }
     case "stop":
       return ok(await stopSession(actor, id));
+    case "continue": {
+      const b = await readJson(req, continueBody);
+      await continueSession(actor, id, { countGap: b.countGap });
+      return ok(OK);
+    }
     case "release":
       await releaseTable(actor, id);
       return ok(OK);

@@ -107,11 +107,21 @@ export function hasPendingRefund(refunds: readonly Pick<RefundDTO, "state">[]): 
   return refunds.some((r) => r.state === "pending");
 }
 
-/** Summary "Needs attention" titles for the refund entries; anything else is shown as it came. */
+const ATTENTION_TITLES: Record<string, string> = {
+  "payment.conflict": "Paid twice?",
+  "session.reverse_paid": "Payment reopened",
+  "checkout.cancel_failed": "Card request couldn't be cancelled",
+  "square.cash_failed": "Cash payment not in Square",
+  "square.stock_failed": "Stock not updated in Square",
+  "cash.handoff_unconfirmed": "Cash sale in Square POS not confirmed",
+  "cash.handoff_check_skipped": "Cash sale in Square POS not checked",
+  "refund.failed": "Refund failed",
+  "refund.unconfirmed": "Refund not confirmed",
+};
+
+/** Summary "Needs attention" titles; an entry the list doesn't know is shown as it came. */
 export function attentionTitle(action: string): string {
-  if (action === "refund.failed") return "Refund failed";
-  if (action === "refund.unconfirmed") return "Refund not confirmed";
-  return action;
+  return ATTENTION_TITLES[action] ?? action;
 }
 
 /**

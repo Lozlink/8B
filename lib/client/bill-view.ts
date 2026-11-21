@@ -1,5 +1,5 @@
 import { billTotals, discountCentsFor, itemCents, itemsCents as sumItems, type BillTotals } from "@/lib/domain/bill";
-import { can, type SessionAction } from "@/lib/domain/machine";
+import { can, isCheckoutLive, type SessionAction } from "@/lib/domain/machine";
 import type {
   BillDiscountDTO,
   DiscountDTO,
@@ -221,6 +221,7 @@ const TABLE_ONLY: ReadonlySet<SessionAction> = new Set([
   "resume",
   "transfer",
   "stop",
+  "continue",
   "release_table",
   "edit_times",
 ]);
@@ -264,6 +265,14 @@ export function discountLockedReason(s: Pick<SessionDTO, "parts" | "splitOffCent
 export function billName(s: Pick<SessionDTO, "kind" | "label" | "intervals">): string {
   if (s.kind !== "table") return s.label;
   return sessionTableNames(s) || s.label;
+}
+
+/**
+ * true when a stopped table can go back to running ("Keep playing"): a table's own bill, still on
+ * its table, not split, and with nothing on the Terminal. The server checks the same things.
+ */
+export function canContinue(s: Pick<SessionDTO, "status" | "kind" | "currentTableId" | "parts" | "splitOffCents" | "checkout">): boolean {
+  return billCan(s, "continue") && s.currentTableId !== null && !hasParts(s) && !isCheckoutLive(s.checkout?.status);
 }
 
 /** true for a counter sale that has nothing on it and no card or cash started: safe to throw away. */

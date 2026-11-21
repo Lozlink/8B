@@ -5,6 +5,7 @@
  *   (free) ──start──▶ running ⇄ paused
  *                       │  pause/resume, transfer
  *                       └──stop──▶ awaiting_payment ──mark paid / Square COMPLETED──▶ paid
+ *                       ◀─continue──┘ (still on its table, nothing paid or split)
  *                                         │                                             │
  *            void (manager) ◀─────────────┘                 reverse (manager) ◀────────┘
  */
@@ -17,6 +18,7 @@ export type SessionAction =
   | "resume"
   | "transfer"
   | "stop"
+  | "continue"
   | "release_table"
   | "charge_card"
   | "cancel_checkout"
@@ -57,6 +59,7 @@ const ALLOWED_FROM: Record<SessionAction, readonly SessionStatus[]> = {
   resume: ["paused"],
   transfer: ["running", "paused"],
   stop: ["running", "paused"],
+  continue: ["awaiting_payment"],
   release_table: ["awaiting_payment"],
   charge_card: ["awaiting_payment"],
   cancel_checkout: ["awaiting_payment"],
@@ -103,6 +106,7 @@ const ACTION_LABEL: Record<SessionAction, string> = {
   resume: "resume",
   transfer: "transfer",
   stop: "stop",
+  continue: "carry on",
   release_table: "move to the unpaid list",
   charge_card: "charge",
   cancel_checkout: "cancel the card checkout for",
