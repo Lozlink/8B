@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { EMPTY_SCAN, SCAN_GAP_MS, scanStep, type KeyInput, type ScanState } from "./scanner";
+import { EMPTY_SCAN, SCAN_GAP_MS, TRAILING_SUFFIX_MS, isTrailingSuffix, scanIdle, scanStep, type KeyInput, type ScanState } from "./scanner";
 
 /** Feeds keys in order; returns each step's result. */
 function feed(keys: KeyInput[], from: ScanState = EMPTY_SCAN) {
@@ -89,5 +89,36 @@ describe("scanStep", () => {
   it("gives up on an over-long burst", () => {
     const long = burst("1".repeat(40), 0, 2);
     expect(feed([...long, enterAfter(long, 2)]).pop()?.code).toBeNull();
+  });
+});
+
+describe("scanners that don't end with a prompt Enter", () => {
+  const stateAfter = (keys: KeyInput[]) => feed(keys).at(-1)?.state ?? EMPTY_SCAN;
+
+  it("takes Tab as the suffix, like Enter", () => {
+    const keys = burst("9300675024235", 1000, 8);
+    const steps = feed([...keys, { key: "Tab", timeMs: keys[keys.length - 1].timeMs + 8 }]);
+    expect(steps.at(-1)).toMatchObject({ code: "9300675024235", consume: true });
+  });
+
+  it("no suffix: a fast burst that is a barcode is a scan once the keys stop", () => {
+    expect(scanIdle(stateAfter(burst("9300675024235", 1000, 8)))).toBe("9300675024235");
+    expect(scanIdle(stateAfter(burst("80001218", 1000, 8)))).toBe("80001218");
+  });
+
+  it("no suffix: typing, short bursts and non-barcodes are not scans", () => {
+    expect(scanIdle(stateAfter(burst("9300675024235", 1000, SCAN_GAP_MS + 40)))).toBeNull();
+    expect(scanIdle(stateAfter(burst("12345", 1000, 8)))).toBeNull();
+    expect(scanIdle(stateAfter(burst("ABC12345", 1000, 8)))).toBeNull();
+    expect(scanIdle(stateAfter(burst("00000000", 1000, 8)))).toBeNull();
+    expect(scanIdle(EMPTY_SCAN)).toBeNull();
+  });
+
+  it("a suffix that turns up late after such a scan is recognised, and only then", () => {
+    expect(isTrailingSuffix({ key: "Enter", timeMs: 2100 }, 2000)).toBe(true);
+    expect(isTrailingSuffix({ key: "Tab", timeMs: 2100 }, 2000)).toBe(true);
+    expect(isTrailingSuffix({ key: "Enter", timeMs: 2000 + TRAILING_SUFFIX_MS }, 2000)).toBe(false);
+    expect(isTrailingSuffix({ key: "5", timeMs: 2100 }, 2000)).toBe(false);
+    expect(isTrailingSuffix({ key: "Enter", timeMs: 2100 }, null)).toBe(false);
   });
 });

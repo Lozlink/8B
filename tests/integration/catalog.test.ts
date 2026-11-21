@@ -777,6 +777,24 @@ describe("C5. barcodes, the stock-tracking flag and the tax check", () => {
     ]);
   });
 
+  it("a SKU that is a barcode stands in when there is no GTIN (Square's GTIN field can't hold an EAN-8)", () => {
+    const { products } = mapCatalog(
+      [
+        item("I_A", "A", [variation("V_A", { data: { sku: "80001218" } })]),
+        item("I_B", "B", [variation("V_B", { data: { upc: "9300675024235", sku: "80001218" } })]),
+        item("I_C", "C", [variation("V_C", { data: { upc: "ABC123", sku: "9310072026404" } })]),
+        item("I_D", "D", [variation("V_D", { data: { sku: "COKE-375" } })]),
+      ],
+      LOC,
+    );
+    expect(products.map((p) => [p.id, p.barcode, p.sku])).toEqual([
+      ["V_A", "80001218", "80001218"],
+      ["V_B", "9300675024235", "80001218"],
+      ["V_C", "9310072026404", "9310072026404"],
+      ["V_D", null, "COKE-375"],
+    ]);
+  });
+
   it("stock is tracked when Square says so, and the location's own setting wins", () => {
     const { products } = mapCatalog(
       [

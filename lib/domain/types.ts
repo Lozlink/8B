@@ -44,7 +44,7 @@ export interface ProductDTO {
   /** false = GST-free (the Square item has no tax attached). */
   taxed: boolean;
   category: string | null;
-  /** The item's barcode in Square (its GTIN), digits only. null = it has none. */
+  /** The item's barcode in Square (its GTIN, else a SKU that is a barcode), digits only. null = it has none. */
   barcode: string | null;
   /** The item's picture in Square (the full-size original; show it through next/image). null = it has none. */
   imageUrl: string | null;

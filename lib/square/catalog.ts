@@ -23,7 +23,11 @@ export interface CatalogProduct {
   priceCents: number;
   taxed: boolean;
   category: string | null;
-  /** The variation's GTIN (Square's `upc`), digits only. Null if it has none or it isn't a barcode. */
+  /**
+   * What a scanner reads off the pack, digits only: the variation's GTIN (Square's `upc`), else its
+   * SKU when that is a barcode. Square's GTIN field takes 12 to 14 digits, so a short code (an
+   * 8-digit EAN-8) can only be kept in the SKU. Null if neither is a barcode.
+   */
   barcode: string | null;
   sku: string | null;
   /** Square tracks stock for this variation at our location. */
@@ -127,7 +131,7 @@ function variationsAt(item: Square.CatalogObject.Item, locationId: string): Vari
       // Amounts come back as bigint; convert before anything tries to JSON.stringify them.
       priceCents: money?.amount != null ? Number(money.amount) : null,
       currency: money?.currency,
-      barcode: toBarcode(d.upc),
+      barcode: toBarcode(d.upc) ?? toBarcode(d.sku),
       sku: (d.sku ?? "").trim().slice(0, SKU_MAX).trim() || null,
       // The location's own setting wins; unset at both levels means stock isn't tracked.
       tracked: (override?.trackInventory ?? d.trackInventory) === true,
