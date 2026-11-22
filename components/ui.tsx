@@ -101,7 +101,7 @@ export function Sheet({ title, onClose, children, raised, size = "md", locked }:
         className={`sheet-in flex max-h-[94dvh] w-full ${width} flex-col overflow-hidden rounded-t-3xl border border-line bg-surface shadow-2xl outline-none sm:rounded-3xl`}
       >
         <div className="flex items-center justify-between gap-3 border-b border-line px-5 py-3">
-          <h2 className="text-xl font-semibold">{title}</h2>
+          <h2 className="min-w-0 break-words text-xl font-semibold">{title}</h2>
           <Button variant="ghost" onClick={onClose} disabled={locked} aria-label="Close" className="-mr-2 w-12">
             <span aria-hidden className="text-2xl leading-none">
               ×

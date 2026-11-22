@@ -36,7 +36,8 @@ export type SessionAction =
   | "merge_back"
   | "discard"
   | "refund"
-  | "print_receipt";
+  | "print_receipt"
+  | "set_details";
 
 /**
  * Status rules only. Some actions are also limited by the KIND of bill (lib/domain/types.ts
@@ -55,6 +56,7 @@ const ALLOWED_FROM: Record<SessionAction, readonly SessionStatus[]> = {
   discard: ["awaiting_payment"],
   refund: ["paid"],
   print_receipt: ["paid"],
+  set_details: ["running", "paused", "awaiting_payment"],
   pause: ["running"],
   resume: ["paused"],
   transfer: ["running", "paused"],
@@ -125,6 +127,7 @@ const ACTION_LABEL: Record<SessionAction, string> = {
   discard: "discard",
   refund: "refund",
   print_receipt: "print a receipt for",
+  set_details: "change the name or note on",
 };
 
 // ---------------------------------------------------------------------------

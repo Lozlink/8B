@@ -106,7 +106,8 @@ export function EnrolView() {
           className={`${inputClass} text-xl tracking-widest`}
           value={code}
           onChange={(e) => setCode(e.target.value)}
-          autoCapitalize="characters"
+          // The code is checked exactly as typed, capitals and all, so the keyboard must not choose them.
+          autoCapitalize="none"
           autoCorrect="off"
           autoComplete="off"
           spellCheck={false}

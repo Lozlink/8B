@@ -2,11 +2,14 @@
 
 import { useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
+import { DetailsDialog } from "@/components/bill-details";
 import { ChargeSheet } from "@/components/charge-sheet";
 import { SessionDetailSheet } from "@/components/session-detail-sheet";
 import { Button, Sheet, Spinner } from "@/components/ui";
 import { useToast } from "@/components/toast";
 import { api } from "@/lib/client/api";
+import { detailsOf } from "@/lib/client/bill-details";
+import { withName } from "@/lib/client/bill-view";
 import { findByBarcode } from "@/lib/client/barcode";
 import { authRedirect, errorMessage } from "@/lib/client/errors";
 import { useFloor, useServerNow } from "@/lib/client/floor-context";
@@ -24,6 +27,8 @@ type Overlay =
   | { kind: "charge"; sessionId: string; created?: boolean }
   | { kind: "transfer"; session: SessionDTO }
   | { kind: "stop"; session: SessionDTO }
+  /** The session as it was when the dialog opened: the fields are filled from it once. */
+  | { kind: "details"; session: SessionDTO }
   | null;
 
 export function FloorView() {
@@ -50,6 +55,7 @@ export function FloorView() {
       stop: (s) => setOverlay({ kind: "stop", session: s }),
       charge: (s) => setOverlay({ kind: "charge", sessionId: s.id }),
       detail: (s) => setOverlay({ kind: "detail", sessionId: s.id }),
+      details: (s) => setOverlay({ kind: "details", session: s }),
     }),
     [run],
   );
@@ -118,7 +124,7 @@ export function FloorView() {
   const doTransfer = async (s: SessionDTO, table: TableDTO) => {
     const ok = await run(keyOf(s), () => api.transfer(s.id, table.id));
     if (ok) {
-      toast.show(`Moved to ${table.name}`, "success");
+      toast.show(withName(`Moved to ${table.name}`, s.customerName), "success");
       setOverlay(null);
     }
   };
@@ -164,7 +170,7 @@ export function FloorView() {
       ) : null}
 
       {overlay?.kind === "transfer" ? (
-        <Sheet title={`Transfer from ${tableName(floor.tables, overlay.session.currentTableId)}`} onClose={() => setOverlay(null)} locked={inFlight(keyOf(overlay.session))}>
+        <Sheet title={withName(`Transfer from ${tableName(floor.tables, overlay.session.currentTableId)}`, overlay.session.customerName)} onClose={() => setOverlay(null)} locked={inFlight(keyOf(overlay.session))}>
           {freeTables.length === 0 ? (
             <p className="py-6 text-center text-lg text-muted">No free tables to move to.</p>
           ) : (
@@ -182,6 +188,15 @@ export function FloorView() {
             </>
           )}
         </Sheet>
+      ) : null}
+
+      {overlay?.kind === "details" ? (
+        <DetailsDialog
+          sessionId={overlay.session.id}
+          subject={tableName(floor.tables, overlay.session.currentTableId)}
+          initial={detailsOf(overlay.session)}
+          onClose={() => setOverlay(null)}
+        />
       ) : null}
 
       {overlay?.kind === "stop" ? (
@@ -226,7 +241,7 @@ function StopConfirm({
   const nowMs = useServerNow();
   const est = floor ? estimate(session, floor.pricing, nowMs) : null;
   return (
-    <Sheet title={`Stop ${tableLabel}?`} onClose={onCancel} locked={pending}>
+    <Sheet title={`Stop ${withName(tableLabel, session.customerName)}?`} onClose={onCancel} locked={pending}>
       <div className="flex flex-col gap-5">
         <p className="text-lg">
           Played so far: <strong className="tabular-nums">{est ? formatClock(est.actualMs) : "—"}</strong>

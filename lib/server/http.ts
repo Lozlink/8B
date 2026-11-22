@@ -19,6 +19,7 @@ const CONSTRAINT_MESSAGES: Record<string, string> = {
   session_intervals_no_session_overlap: "Those times overlap each other.",
   staff_active_name_uniq: "Someone with that name already exists.",
   tables_name_uniq: "A table with that name already exists.",
+  day_closes_business_date_seq_key: "Someone else has just closed this day. Reload the End of day screen.",
 };
 
 export function errorResponse(e: unknown): NextResponse<ApiErrorBody> {

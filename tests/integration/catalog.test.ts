@@ -703,10 +703,10 @@ describe("C4. DTOs", () => {
     let s = await getAdminState(h.staff.manager);
     expect(s.catalog).toEqual({
       products: [
-        { id: "VAR_COKE", name: "Coke", priceCents: 450, taxed: true, category: "Drinks", active: true, barcode: null, imageUrl: null, stock: null, sku: null, tracked: false },
-        { id: "VAR_WATER", name: "Water", priceCents: 300, taxed: false, category: "Drinks", active: true, barcode: null, imageUrl: null, stock: null, sku: null, tracked: false },
-        { id: "VAR_CHIPS", name: "Chips", priceCents: 600, taxed: true, category: null, active: true, barcode: null, imageUrl: null, stock: null, sku: null, tracked: false },
-        { id: "VAR_OLD", name: "Old pie", priceCents: 500, taxed: true, category: null, active: false, barcode: null, imageUrl: null, stock: null, sku: null, tracked: false },
+        { id: "VAR_COKE", name: "Coke", priceCents: 450, taxed: true, category: "Drinks", active: true, barcode: null, imageUrl: null, stock: null, sku: null, tracked: false, costCents: null },
+        { id: "VAR_WATER", name: "Water", priceCents: 300, taxed: false, category: "Drinks", active: true, barcode: null, imageUrl: null, stock: null, sku: null, tracked: false, costCents: null },
+        { id: "VAR_CHIPS", name: "Chips", priceCents: 600, taxed: true, category: null, active: true, barcode: null, imageUrl: null, stock: null, sku: null, tracked: false, costCents: null },
+        { id: "VAR_OLD", name: "Old pie", priceCents: 500, taxed: true, category: null, active: false, barcode: null, imageUrl: null, stock: null, sku: null, tracked: false, costCents: null },
       ],
       discounts: [],
       syncedAt: null,

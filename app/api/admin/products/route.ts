@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { setItemiseCharges } from "@/lib/server/admin";
 import { requireAdmin } from "@/lib/server/admin-route";
+import { setCosts } from "@/lib/server/costs";
 import { handler, ok, readJson } from "@/lib/server/http";
 import { syncProducts } from "@/lib/server/items";
 import { reason } from "@/lib/server/schemas";
@@ -12,6 +13,11 @@ const body = z.discriminatedUnion("op", [
   z.object({ op: z.literal("sync") }),
   z.object({ op: z.literal("stock-retry") }),
   z.object({ op: z.literal("itemise"), enabled: z.boolean(), reason }),
+  // How many, and what a cost may be, are checked by setCosts, which says so in words.
+  z.object({
+    op: z.literal("costs"),
+    costs: z.array(z.object({ productId: z.string().min(1).max(200), costCents: z.number().nullable() })).max(2000),
+  }),
 ]);
 
 export const POST = handler(async (req: Request) => {
@@ -29,6 +35,7 @@ export const POST = handler(async (req: Request) => {
     return ok({ count });
   }
   if (b.op === "stock-retry") return ok(await retryStockMoves(actor, manager));
+  if (b.op === "costs") return ok(await setCosts(actor, manager, b.costs));
   await setItemiseCharges(actor, manager, b.enabled, b.reason);
   return ok({ ok: true as const });
 });

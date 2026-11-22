@@ -95,7 +95,7 @@ describe("canOfferSplit", () => {
 });
 
 describe("partStatus", () => {
-  const part = (over: Partial<PartDTO> = {}): PartDTO => ({ id: "p", amountCents: 1000, status: "awaiting_payment", onTerminal: false, ...over });
+  const part = (over: Partial<PartDTO> = {}): PartDTO => ({ id: "p", amountCents: 1000, customerName: null, status: "awaiting_payment", onTerminal: false, ...over });
 
   it("paid and void are plain", () => {
     expect(partStatus(part({ status: "paid" }))).toEqual({ label: "Paid", tone: "ok" });
@@ -116,7 +116,7 @@ describe("partStatus", () => {
 });
 
 describe("nextUnpaidBill: three mates, two by card, one in cash", () => {
-  const p = (id: string, over: Partial<PartDTO> = {}): PartDTO => ({ id, amountCents: 3000, status: "awaiting_payment", onTerminal: false, ...over });
+  const p = (id: string, over: Partial<PartDTO> = {}): PartDTO => ({ id, amountCents: 3000, customerName: null, status: "awaiting_payment", onTerminal: false, ...over });
   const root = (parts: PartDTO[], over: Partial<SessionDTO> = {}) =>
     makeSession({ id: "root", label: "Table 3", totalCents: 3000, splitOffCents: 6000, parts, ...over });
   const partBill = (id: string) =>
@@ -158,6 +158,6 @@ describe("inSplit", () => {
     expect(inSplit(makeSession())).toBe(false);
     expect(inSplit(makeSession({ kind: "part", splitOfId: "x" }))).toBe(true);
     expect(inSplit(makeSession({ splitOffCents: 100 }))).toBe(true);
-    expect(inSplit(makeSession({ parts: [{ id: "p", amountCents: 1, status: "void", onTerminal: false }] }))).toBe(true);
+    expect(inSplit(makeSession({ parts: [{ id: "p", amountCents: 1, customerName: null, status: "void", onTerminal: false }] }))).toBe(true);
   });
 });

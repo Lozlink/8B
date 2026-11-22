@@ -49,5 +49,7 @@ export const MAX_TIME_RTT_MS = 2_000;
  */
 export function timeOffsetSample(t0: number, t1: number, serverMs: number): number | null {
   if (!Number.isFinite(serverMs) || t1 < t0 || t1 - t0 > MAX_TIME_RTT_MS) return null;
-  return serverMs - (t0 + t1) / 2;
+  // Rounded: the midpoint of an odd-length round trip is half a millisecond, and a clock with a
+  // fraction in it is no use to anything that counts in whole milliseconds (the pricing engine).
+  return Math.round(serverMs - (t0 + t1) / 2);
 }

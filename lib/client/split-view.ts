@@ -87,7 +87,11 @@ export interface NextBill {
 export function nextUnpaidBill(current: SessionDTO, root: SessionDTO | null): NextBill | null {
   if (!root) return null;
   const part = root.parts.find((p) => p.id !== current.id && partIsOpen(p));
-  if (part) return { id: part.id, kind: "part", label: `${root.label} · share`, amountCents: part.amountCents };
+  if (part) {
+    // A named share says whose it is, so staff know who to turn to next.
+    const label = part.customerName ? `${root.label} · share · ${part.customerName}` : `${root.label} · share`;
+    return { id: part.id, kind: "part", label, amountCents: part.amountCents };
+  }
   const rootOpen =
     current.id !== root.id &&
     root.status === "awaiting_payment" &&

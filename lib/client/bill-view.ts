@@ -267,6 +267,17 @@ export function billName(s: Pick<SessionDTO, "kind" | "label" | "intervals">): s
   return sessionTableNames(s) || s.label;
 }
 
+/** "Table 3 · Sam": a title with the customer's name after it, when the bill has one. */
+export function withName(title: string, customerName: string | null | undefined): string {
+  const name = customerName?.trim();
+  return name ? `${title} · ${name}` : title;
+}
+
+/** `billName` plus the customer's name: what to put in a sheet title or a toast. */
+export function billTitle(s: Pick<SessionDTO, "kind" | "label" | "intervals" | "customerName">): string {
+  return withName(billName(s), s.customerName);
+}
+
 /**
  * true when a stopped table can go back to running ("Keep playing"): a table's own bill, still on
  * its table, not split, and with nothing on the Terminal. The server checks the same things.

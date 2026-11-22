@@ -5,7 +5,7 @@ import { STATUS_LABEL } from "@/lib/domain/machine";
 import type { PricingConfigDTO, SessionDTO, TableDTO } from "@/lib/domain/types";
 import { formatClock } from "@/lib/format";
 import { adjustmentsSummary, billCan, itemCount, itemsLabel, sessionBill } from "@/lib/client/bill-view";
-import { checkoutLabel, estimate } from "@/lib/client/session-view";
+import { checkoutLabel, estimate, movedFrom } from "@/lib/client/session-view";
 import { formatCents } from "@/lib/pricing";
 
 export interface CardActions {
@@ -16,6 +16,8 @@ export interface CardActions {
   stop: (s: SessionDTO) => void;
   charge: (s: SessionDTO) => void;
   detail: (s: SessionDTO) => void;
+  /** Change the name and note on the bill. */
+  details: (s: SessionDTO) => void;
 }
 
 interface Props {
@@ -95,6 +97,8 @@ export function TableCard({ table, session, pricing, nowMs, busy, actions }: Pro
     );
   }
 
+  const moved = session ? movedFrom(session) : null;
+
   return (
     <article
       aria-label={`${table.name}, ${label}`}
@@ -104,6 +108,8 @@ export function TableCard({ table, session, pricing, nowMs, busy, actions }: Pro
         <h2 className="truncate text-2xl font-bold">{table.name}</h2>
         <Badge tone={tone}>{label}</Badge>
       </header>
+      {session ? <WhoRow table={table} session={session} onEdit={() => actions.details(session)} /> : null}
+      {moved ? <p className="truncate text-base text-muted">{moved}</p> : null}
       {body}
       <div className="mt-2">
         {!session ? (
@@ -135,5 +141,37 @@ export function TableCard({ table, session, pricing, nowMs, busy, actions }: Pro
         )}
       </div>
     </article>
+  );
+}
+
+/**
+ * Who the bill is for, and its note on one truncated line. With no name it is a quiet "Add name".
+ * The whole row is one 48px target, so it is easy to hit and hard to confuse with the card's own.
+ */
+function WhoRow({ table, session, onEdit }: { table: TableDTO; session: SessionDTO; onEdit: () => void }) {
+  const { customerName: name, note } = session;
+  if (!billCan(session, "set_details")) {
+    // Nothing to change any more: just say who it is.
+    return name || note ? (
+      <div className="mt-1 flex min-w-0 flex-col">
+        {name ? <span className="block truncate text-xl font-semibold">{name}</span> : null}
+        {note ? <span className="block truncate text-base text-muted">{note}</span> : null}
+      </div>
+    ) : null;
+  }
+  return (
+    <button
+      type="button"
+      onClick={onEdit}
+      aria-label={name ? `${name}. Change name or note for ${table.name}` : `Add name for ${table.name}`}
+      className="-mx-1 mt-1 flex min-h-12 min-w-0 flex-col justify-center rounded-xl px-1 text-left active:bg-surface-2"
+    >
+      {name ? (
+        <span className="block truncate text-xl font-semibold">{name}</span>
+      ) : (
+        <span className="block truncate text-base text-muted">Add name</span>
+      )}
+      {note ? <span className="block truncate text-base text-muted">{note}</span> : null}
+    </button>
   );
 }

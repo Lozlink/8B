@@ -120,6 +120,8 @@ export type BillKind = "table" | "counter" | "part";
 export interface PartDTO {
   id: string;
   amountCents: number;
+  /** Who this share belongs to, if staff named it (the part's own `SessionDTO.customerName`). */
+  customerName: string | null;
   status: SessionStatus;
   /** true while a card request for this part is live on the Terminal. */
   onTerminal: boolean;
@@ -173,6 +175,11 @@ export interface SessionDTO {
   label: string;
   status: SessionStatus;
   currentTableId: string | null;
+  /**
+   * Who the bill belongs to, as staff typed it ("Sam", "Tuesday comp"). Null = nobody has named it.
+   * Up to 40 characters. Set with `api.setDetails` while the bill is open; `note` the same way.
+   */
+  customerName: string | null;
   openedAt: string;
   openedByName: string;
   closedAt: string | null;
@@ -215,6 +222,7 @@ export interface SessionDTO {
   /** Where the latest cash payment for this bill stands in Square. Null if it was never paid in cash. */
   squareCash: SquareCashDTO | null;
   voidReason: string | null;
+  /** Anything staff want to remember about the bill, up to 200 characters. Null = none. */
   note: string | null;
   intervals: IntervalDTO[];
   /** Latest Terminal checkout attempt, if any. */
@@ -372,6 +380,11 @@ export interface SummaryDTO {
   voids: { count: number; items: (SummarySessionRow & { reason: string; voidedByName: string | null })[] };
   /** Flagged audit entries from the window, newest first: the ones still to look at and the ones a manager has checked. */
   attention: AttentionEntryDTO[];
+  /**
+   * The latest End of day close of this business day, in brief; null = not closed. The whole
+   * record is `api.dayClose(date)`. `changedSinceClose`: what was billed or taken has moved since.
+   */
+  close: { closedAt: string; closedByName: string; varianceCents: number; changedSinceClose: boolean } | null;
 }
 
 export interface AttentionEntryDTO extends AuditEntryDTO {
@@ -384,6 +397,9 @@ export interface SummarySessionRow {
   kind: BillKind;
   /** Table names for a table's bill; "Counter sale" or "Table 3 · share" otherwise (SessionDTO.label). */
   tableNames: string;
+  /** Same as on SessionDTO. */
+  customerName: string | null;
+  note: string | null;
   openedAt: string;
   closedAt: string | null;
   billedMinutes: number | null;
@@ -446,6 +462,11 @@ export interface AdminProductDTO extends ProductDTO {
   sku: string | null;
   /** true when Square tracks stock for this item at our location. */
   tracked: boolean;
+  /**
+   * What one unit costs the venue, EX GST, in cents. Typed in by a manager (`api.adminSetCosts`);
+   * never sent to Square. Null = not entered. Only ever sent to manager screens.
+   */
+  costCents: number | null;
 }
 
 /** How the app's stock updates to Square are going. */
@@ -494,6 +515,156 @@ export interface AdminStateDTO {
   devices: AdminDeviceDTO[];
   /** null when Square isn't configured on the server. */
   squareEnvironment: "sandbox" | "production" | null;
+}
+
+// ---------------------------------------------------------------------------
+// Profit (manager only)
+// ---------------------------------------------------------------------------
+
+/**
+ * One product (or one custom charge name) sold in the report's dates. Money "ex GST" has the GST
+ * taken out of taxed lines (price × 10/11) so it can be set against a cost, which is ex GST.
+ * A line's cost is the cost copied onto the bill when it was sold, else the product's cost now;
+ * a line with neither is "uncosted" and is left out of `costCents` and `profitCents`.
+ */
+export interface ProfitLineDTO {
+  /** Null for a custom charge (grouped by the name staff typed). */
+  productId: string | null;
+  name: string;
+  quantity: number;
+  /** What it sold for, GST included. */
+  salesCents: number;
+  salesExGstCents: number;
+  /** How many of `quantity` have no cost. 0 = the figures below cover every one sold. */
+  uncostedQuantity: number;
+  /** Cost of the ones that have a cost. */
+  costCents: number;
+  /** Ex-GST sales of the ones that have a cost, less `costCents`. */
+  profitCents: number;
+  /** Profit as a share of those ex-GST sales, in basis points (2500 = 25%). Null when none has a cost. */
+  marginBps: number | null;
+}
+
+export interface ProfitReportDTO {
+  /** The business date running now, YYYY-MM-DD. Work "yesterday" and "this month" out from this, not from the device's clock. */
+  today: string;
+  /** Business dates, both included, YYYY-MM-DD. */
+  from: string;
+  to: string;
+  /** Biggest profit first; uncosted lines last. Same bills as the daily summary's "items sold". */
+  lines: ProfitLineDTO[];
+  /** The lines added up. `marginBps` is over the costed sales only. */
+  items: {
+    quantity: number;
+    salesCents: number;
+    salesExGstCents: number;
+    uncostedQuantity: number;
+    /** Ex-GST sales that have no cost against them. */
+    uncostedSalesExGstCents: number;
+    costCents: number;
+    profitCents: number;
+    marginBps: number | null;
+  };
+  /** Table time billed in the dates (nothing is set against it), GST included and ex GST. */
+  table: { cents: number; exGstCents: number };
+  /** Discounts given on those bills. They come off the bill, not off any one item, so they are not in the lines. */
+  discountCents: number;
+  /** What the stock Square counts is worth at cost, right now (not for the dates). */
+  stock: { costCents: number; units: number; uncostedProducts: number };
+}
+
+// ---------------------------------------------------------------------------
+// End of day
+// ---------------------------------------------------------------------------
+
+/** A business day's figures: the same numbers as the daily summary, flattened so they can be kept. */
+export interface DayCloseTotals {
+  sessionCount: number;
+  billedMinutes: number;
+  billedCents: number;
+  tableCents: number;
+  itemsCents: number;
+  discountCents: number;
+  writtenOffCents: number;
+  cardCount: number;
+  cardCents: number;
+  cashCount: number;
+  /** Cash collected (rounded to 5c), so it matches the drawer. */
+  cashCents: number;
+  cashRoundingCents: number;
+  refundCount: number;
+  refundCents: number;
+  refundCardCents: number;
+  refundCashCents: number;
+  /** card + cash − refunds. */
+  takingsCents: number;
+  /** Bills closed that day and still not paid. */
+  unpaidCount: number;
+  unpaidCents: number;
+  /** Bills from earlier days still not paid. */
+  olderUnpaidCount: number;
+  olderUnpaidCents: number;
+  voidCount: number;
+}
+
+/** One time a business day was closed. Never changes once written. */
+export interface DayCloseDTO {
+  id: string;
+  /** YYYY-MM-DD */
+  businessDate: string;
+  /** 1 = the day's first close; higher = it was closed again. */
+  seq: number;
+  closedAt: string;
+  closedByName: string;
+  /** The manager who approved closing it again; null on a first close. */
+  approvedByName: string | null;
+  deviceLabel: string | null;
+  floatCents: number;
+  countedCashCents: number;
+  /** floatCents + cash taken − cash refunded, at the moment of closing. */
+  expectedCashCents: number;
+  /** counted − expected. Negative = short. */
+  varianceCents: number;
+  /** Face value in cents → how many, when the cash was counted by note and coin. */
+  cashCounts: Record<string, number> | null;
+  note: string | null;
+  /** Why it was closed again. */
+  reason: string | null;
+  totals: DayCloseTotals;
+}
+
+/** What the End of day screen needs for one business day. */
+export interface DayCloseStateDTO {
+  /** YYYY-MM-DD */
+  businessDate: string;
+  /** true when this is the business day that is running now. */
+  isCurrent: boolean;
+  timezone: string;
+  /** ISO; the day's window. */
+  from: string;
+  to: string;
+  /** The day's figures right now. */
+  totals: DayCloseTotals;
+  /** The float to start the form with: the last close's, else $200. */
+  suggestedFloatCents: number;
+  /** totals.cashCents − totals.refundCashCents. Add the float for what should be in the drawer. */
+  cashMovementCents: number;
+  /**
+   * Tables still running or paused. The day can't be closed while there are any (current day only;
+   * always empty for an earlier day).
+   */
+  running: { sessionId: string; label: string; customerName: string | null }[];
+  /** Not blockers, but worth sorting out before going home. Staff-readable sentences. */
+  warnings: string[];
+  /** Every time this day was closed, newest first. Empty = not closed yet. */
+  closes: DayCloseDTO[];
+  /**
+   * true when closing this day takes a manager PIN and a reason: it is already closed, or it is
+   * older than yesterday. Use this, not `closes.length`, to decide whether to ask for them.
+   */
+  needsManager: boolean;
+  /** true when the day is closed and its figures have moved since the last close. */
+  changedSinceClose: boolean;
 }
 
 export interface PairingCodeDTO {

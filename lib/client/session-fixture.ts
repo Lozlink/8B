@@ -25,6 +25,7 @@ export function makeSession(over: Partial<SessionDTO> = {}): SessionDTO {
     label: "Table 1",
     status: "awaiting_payment",
     currentTableId: "t-1",
+    customerName: null,
     openedAt: "2026-11-20T09:00:00.000Z",
     openedByName: "Sam",
     closedAt: "2026-11-20T10:00:00.000Z",

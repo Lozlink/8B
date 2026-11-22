@@ -54,7 +54,7 @@ export async function getAdminState(manager: Manager): Promise<AdminStateDTO> {
   return {
     manager,
     catalog: {
-      products: products.map((p) => ({ ...productDTO(p, held.get(p.id) ?? 0), active: p.active, sku: p.sku, tracked: p.tracked })),
+      products: products.map((p) => ({ ...productDTO(p, held.get(p.id) ?? 0), active: p.active, sku: p.sku, tracked: p.tracked, costCents: p.cost_cents })),
       discounts: discounts.map((d) => ({ id: d.id, name: d.name, kind: d.kind, value: d.value, active: d.active })),
       syncedAt: catalog.synced_at?.toISOString() ?? null,
       tableHireLinked: !!catalog.table_hire_variation_id,

@@ -6,6 +6,7 @@ import {
   itemsSoldKey,
   billCan,
   billName,
+  billTitle,
   billOf,
   discountRowLabel,
   discountWhat,
@@ -16,6 +17,7 @@ import {
   lineLabel,
   minus,
   sessionBill,
+  withName,
 } from "./bill-view";
 import { makeItem, makeSession } from "./session-fixture";
 import { cashDueCents } from "@/lib/domain/bill";
@@ -237,6 +239,36 @@ describe("words", () => {
   });
 });
 
+describe("billTitle and withName: the customer's name goes after the bill's name", () => {
+  it("adds the name when there is one", () => {
+    expect(billTitle(makeSession({ customerName: "Sam" }))).toBe("Table 1 · Sam");
+    expect(billTitle(makeSession({ kind: "counter", label: "Counter sale", intervals: [], customerName: "Jo" }))).toBe("Counter sale · Jo");
+    expect(billTitle(makeSession({ kind: "part", label: "Table 3 · share", intervals: [], customerName: "Ali" }))).toBe("Table 3 · share · Ali");
+  });
+
+  it("is just the bill's name with no customer name", () => {
+    expect(billTitle(makeSession())).toBe("Table 1");
+    expect(billTitle(makeSession({ customerName: "   " }))).toBe("Table 1");
+  });
+
+  it("follows a bill that moved tables", () => {
+    const moved = makeSession({
+      customerName: "Sam",
+      intervals: [
+        { id: "i1", tableId: "t1", tableName: "Table 1", startedAt: "2026-11-20T09:00:00.000Z", endedAt: "2026-11-20T09:30:00.000Z" },
+        { id: "i2", tableId: "t4", tableName: "Table 4", startedAt: "2026-11-20T09:30:00.000Z", endedAt: null },
+      ],
+    });
+    expect(billTitle(moved)).toBe("Table 1 → Table 4 · Sam");
+  });
+
+  it("withName works on any title", () => {
+    expect(withName("Stop Table 2", "Sam")).toBe("Stop Table 2 · Sam");
+    expect(withName("Stop Table 2", null)).toBe("Stop Table 2");
+    expect(withName("Stop Table 2", undefined)).toBe("Stop Table 2");
+  });
+});
+
 describe("billCan: what each kind of bill can do", () => {
   const table = makeSession({ status: "running" });
   const counter = makeSession({ kind: "counter", status: "awaiting_payment" });
@@ -277,7 +309,7 @@ describe("billCan: what each kind of bill can do", () => {
   it("a split bill is flagged so its discount can be locked", () => {
     expect(hasParts(makeSession())).toBe(false);
     expect(hasParts(makeSession({ splitOffCents: 500 }))).toBe(true);
-    expect(hasParts(makeSession({ parts: [{ id: "p", amountCents: 500, status: "awaiting_payment", onTerminal: false }] }))).toBe(true);
+    expect(hasParts(makeSession({ parts: [{ id: "p", amountCents: 500, customerName: null, status: "awaiting_payment", onTerminal: false }] }))).toBe(true);
   });
 
   it("only an empty counter sale with no card or cash started is thrown away", () => {
@@ -337,8 +369,21 @@ describe("the day's Billed line with shares written off", () => {
   });
 });
 
+describe("billCan: changing the name and note", () => {
+  it("is allowed on every kind while the bill is open, and not once it is settled", () => {
+    for (const kind of ["table", "counter", "part"] as const) {
+      for (const status of ["running", "paused", "awaiting_payment"] as const) {
+        const ok = !(kind !== "table" && (status === "running" || status === "paused"));
+        if (ok) expect(billCan({ kind, status }, "set_details")).toBe(true);
+      }
+      expect(billCan({ kind, status: "paid" }, "set_details")).toBe(false);
+      expect(billCan({ kind, status: "void" }, "set_details")).toBe(false);
+    }
+  });
+});
+
 describe("discountLockedReason", () => {
-  const part = (status: "awaiting_payment" | "paid" | "void") => ({ id: "p", amountCents: 500, status, onTerminal: false });
+  const part = (status: "awaiting_payment" | "paid" | "void") => ({ id: "p", amountCents: 500, customerName: null, status, onTerminal: false });
 
   it("a bill with no parts can change its discount", () => {
     expect(discountLockedReason(makeSession())).toBeNull();

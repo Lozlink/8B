@@ -6,12 +6,15 @@ import { useToast } from "@/components/toast";
 import { Button, ProductImage, Notice, inputClass } from "@/components/ui";
 import { api } from "@/lib/client/api";
 import { discountWhat } from "@/lib/client/bill-view";
+import { noCostCount, stockAtCost } from "@/lib/client/costs";
 import { isManagerRequired } from "@/lib/client/errors";
 import { ALL_CATEGORY, categoryOptions, filterProducts, stockTone } from "@/lib/client/item-picker";
 import { useAction } from "@/lib/client/use-action";
 import type { AdminProductDTO } from "@/lib/domain/types";
 import { formatDateTime } from "@/lib/format";
 import { formatCents } from "@/lib/pricing";
+import { CostLine } from "./cost-editor";
+import { CostPasteDialog } from "./cost-paste-dialog";
 import { TabHeader, type TabProps } from "./shared";
 
 type Gap = "no-barcode" | "untracked" | "low";
@@ -42,6 +45,8 @@ export function ItemsTab({ state, reload, onError }: TabProps) {
   const [query, setQuery] = useState("");
   const [category, setCategory] = useState(ALL_CATEGORY);
   const [gap, setGap] = useState<Gap | null>(null);
+  const [noCost, setNoCost] = useState(false);
+  const [pasting, setPasting] = useState(false);
   const { catalog, settings } = state;
   const on = settings.itemiseCharges;
 
@@ -54,16 +59,21 @@ export function ItemsTab({ state, reload, onError }: TabProps) {
     return GAPS.map((g) => ({ ...g, count: active.filter(g.test).length }));
   }, [allProducts]);
   const activeGap = gapCounts.find((g) => g.key === gap && g.count > 0) ?? null;
+  const missingCosts = useMemo(() => noCostCount(allProducts), [allProducts]);
+  const stockCost = useMemo(() => stockAtCost(allProducts), [allProducts]);
+  const onlyNoCost = noCost && missingCosts > 0;
   const activeCategory = categories.some((c) => c.key === category) ? category : ALL_CATEGORY;
   const products = useMemo(() => {
     const found = filterProducts(allProducts, activeCategory, query);
-    return activeGap ? found.filter((p) => p.active && activeGap.test(p)) : found;
-  }, [allProducts, activeCategory, query, activeGap]);
-  const filtering = query.trim() !== "" || activeCategory !== ALL_CATEGORY || activeGap !== null;
+    const gapped = activeGap ? found.filter((p) => p.active && activeGap.test(p)) : found;
+    return onlyNoCost ? gapped.filter((p) => p.active && p.costCents === null) : gapped;
+  }, [allProducts, activeCategory, query, activeGap, onlyNoCost]);
+  const filtering = query.trim() !== "" || activeCategory !== ALL_CATEGORY || activeGap !== null || onlyNoCost;
   const clearFilters = () => {
     setQuery("");
     setCategory(ALL_CATEGORY);
     setGap(null);
+    setNoCost(false);
   };
   const discounts = [...catalog.discounts].sort((a, b) => Number(b.active) - Number(a.active));
 
@@ -189,6 +199,22 @@ export function ItemsTab({ state, reload, onError }: TabProps) {
         <p className="py-4 text-center text-muted">No items yet. Add them in Square, then tap Refresh from Square.</p>
       ) : (
         <>
+          <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-line bg-surface p-4">
+            <div className="min-w-0">
+              <p className="text-sm font-semibold text-muted">Stock at cost</p>
+              <p className="text-lg font-semibold tabular-nums">
+                {formatCents(stockCost.costCents)} <span className="text-base font-normal text-muted">ex GST, {stockCost.units} in stock</span>
+              </p>
+              <p className="mt-1 text-sm text-muted">
+                {stockCost.uncostedProducts === 0
+                  ? "Every tracked item has a cost."
+                  : `${stockCost.uncostedProducts} tracked item${stockCost.uncostedProducts === 1 ? " has" : "s have"} no cost, so ${stockCost.uncostedProducts === 1 ? "it is" : "they are"} not counted.`}
+              </p>
+            </div>
+            <Button variant="primary" size="lg" onClick={() => setPasting(true)}>
+              Paste costs
+            </Button>
+          </div>
           <input
             type="text"
             inputMode="search"
@@ -211,6 +237,13 @@ export function ItemsTab({ state, reload, onError }: TabProps) {
                   <span className={`text-sm font-normal tabular-nums ${c.key === activeCategory ? "" : "text-muted"}`}>{c.count}</span>
                 </button>
               ))}
+            </div>
+          ) : null}
+          {missingCosts > 0 ? (
+            <div role="group" aria-label="Costs" className="-mx-1 flex gap-2 overflow-x-auto px-1 pb-1">
+              <button type="button" aria-pressed={onlyNoCost} onClick={() => setNoCost(!onlyNoCost)} className={chipClass(onlyNoCost)}>
+                No cost yet ({missingCosts})
+              </button>
             </div>
           ) : null}
           {gapCounts.some((g) => g.count > 0) ? (
@@ -260,6 +293,7 @@ export function ItemsTab({ state, reload, onError }: TabProps) {
                         <StockText p={p} />
                       </p>
                     ) : null}
+                    <CostLine product={p} reload={reload} onError={onError} />
                   </div>
                   <span className="shrink-0 text-lg font-semibold tabular-nums">{formatCents(p.priceCents)}</span>
                 </li>
@@ -327,6 +361,10 @@ export function ItemsTab({ state, reload, onError }: TabProps) {
           <span aria-hidden className="size-9 rounded-full bg-white shadow" />
         </button>
       </div>
+
+      {pasting ? (
+        <CostPasteDialog products={allProducts} reload={reload} onError={onError} onClose={() => setPasting(false)} />
+      ) : null}
 
       {switching ? (
         <ActionDialog

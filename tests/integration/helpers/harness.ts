@@ -40,6 +40,7 @@ export const CHECKOUT_BROADCAST_SQL = read("20261118000100_checkout_broadcast.sq
 export const BILL_EXTRAS_SQL = read("20261119000000_bill_extras.sql");
 export const STOCK_SQL = read("20261121000000_stock_and_barcodes.sql");
 export const PRODUCT_IMAGES_SQL = read("20261121000100_product_images.sql");
+export const NAMES_COSTS_CLOSE_SQL = read("20261123000000_names_costs_day_close.sql");
 
 /** What Supabase provides out of the box. There is deliberately no `realtime` schema. */
 export const PRELUDE_SQL = `
@@ -100,6 +101,7 @@ export async function bootHarness(): Promise<Harness> {
   await pg.exec(`begin;\n${BILL_EXTRAS_SQL}\ncommit;`);
   await pg.exec(`begin;\n${STOCK_SQL}\ncommit;`);
   await pg.exec(`begin;\n${PRODUCT_IMAGES_SQL}\ncommit;`);
+  await pg.exec(`begin;\n${NAMES_COSTS_CLOSE_SQL}\ncommit;`);
 
   const server = new PGLiteSocketServer({ db: pg, port: 0, host: "127.0.0.1" });
   await server.start();

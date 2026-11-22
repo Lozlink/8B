@@ -90,3 +90,17 @@ textarea {
 .sheet-in {
   animation: sheet-in 160ms ease-out;
 }
+
+/* Printing (the End of day report): paper is white whatever the screen is. */
+@media print {
+  :root {
+    color-scheme: light;
+  }
+
+  html,
+  body {
+    background: #fff !important;
+    color: #000 !important;
+    padding: 0;
+  }
+}

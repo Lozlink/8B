@@ -1,9 +1,12 @@
 "use client";
 
 import { useState } from "react";
+import { DetailsDialog } from "@/components/bill-details";
 import { useToast } from "@/components/toast";
 import { Button, Field, Notice, Sheet, inputClass } from "@/components/ui";
 import { api, ApiError } from "@/lib/client/api";
+import { detailsOf, type BillDetails } from "@/lib/client/bill-details";
+import { billCan } from "@/lib/client/bill-view";
 import { errorMessage, isBillChanged } from "@/lib/client/errors";
 import { parseCents } from "@/lib/client/money";
 import { canOfferSplit, evenSplit, partIsOpen, partStatus, takeOut, WAYS, type NextBill, type PartTone } from "@/lib/client/split-view";
@@ -281,6 +284,7 @@ export function PartsPanel({ session, disabled = false, onOpen, onChanged }: Par
                 <p className="font-semibold">
                   Part {i + 1} · <span className="tabular-nums">{formatCents(p.amountCents)}</span>
                 </p>
+                <PartName part={p} number={i + 1} onChanged={onChanged} />
                 <p className={`text-sm font-semibold ${TONE_CLASS[st.tone]}`}>{st.label}</p>
               </div>
               {open ? (
@@ -309,6 +313,51 @@ export function PartsPanel({ session, disabled = false, onOpen, onChanged }: Par
         />
       ) : null}
     </section>
+  );
+}
+
+/**
+ * A share's name. Staff can set it while the share is open. The list only knows the name, and saving
+ * sends the note too, so the share is loaded first: its own note is then sent back as it is.
+ */
+function PartName({ part, number, onChanged }: { part: PartDTO; number: number; onChanged?: () => Promise<void> }) {
+  const toast = useToast();
+  const { run, pending } = useAction();
+  const [editing, setEditing] = useState<BillDetails | null>(null);
+  const name = part.customerName;
+  if (!billCan({ kind: "part", status: part.status }, "set_details")) {
+    return name ? <p className="break-words text-base">{name}</p> : null;
+  }
+  const open = async () => {
+    const d = await run(() => api.session(part.id), { refetch: false });
+    if (!d) return;
+    if (!billCan(d.session, "set_details")) {
+      toast.show("This share has been paid or closed, so its name can't change.", "error");
+      return;
+    }
+    setEditing(detailsOf(d.session));
+  };
+  return (
+    <>
+      <button
+        type="button"
+        disabled={pending}
+        onClick={() => void open()}
+        aria-label={name ? `${name}. Change name for part ${number}` : `Add name to part ${number}`}
+        className="-mx-2 flex min-h-12 max-w-full items-center rounded-lg px-2 text-left text-base disabled:opacity-45 active:bg-surface-2"
+      >
+        <span className={`block truncate ${name ? "font-semibold" : "text-muted"}`}>{pending ? "Loading…" : (name ?? "Add name")}</span>
+      </button>
+      {editing ? (
+        <DetailsDialog
+          sessionId={part.id}
+          subject={`Part ${number}`}
+          initial={editing}
+          onClose={() => setEditing(null)}
+          onSaved={onChanged}
+        />
+      ) : null}
+    </>
   );
 }
 

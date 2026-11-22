@@ -4,6 +4,7 @@ import type {
   AuditEntryDTO,
   BillKind,
   CheckoutDTO,
+  DayCloseTotals,
   DiscountDTO,
   FloorDTO,
   IntervalDTO,
@@ -21,7 +22,8 @@ import type {
   TableDTO,
 } from "@/lib/domain/types";
 import { price, type RateSnapshot } from "@/lib/pricing";
-import { businessWindow, currentBusinessDate, formatYMD } from "@/lib/domain/business-day";
+import { businessWindow, currentBusinessDate, formatYMD, type LocalYMD } from "@/lib/domain/business-day";
+import { hasMoved, totalsOf } from "@/lib/domain/day-close";
 import type postgres from "postgres";
 import { db, type Db } from "./db";
 import { posCashConfig } from "./env";
@@ -171,6 +173,7 @@ interface PartRow {
   id: string;
   split_of: string;
   total_cents: number | null;
+  customer_name: string | null;
   status: SessionRow["status"];
   /** A card request for the part is live on the Terminal (same statuses as `isCheckoutLive`). */
   on_terminal: boolean;
@@ -217,7 +220,7 @@ async function loadSessions(q: Db, where: postgres.Fragment): Promise<SessionDTO
     // manager. A part that was merged back is not one any more.
     parentIds.length
       ? q<PartRow[]>`
-          select p.id, p.split_of, p.total_cents, p.status,
+          select p.id, p.split_of, p.total_cents, p.customer_name, p.status,
                  exists (select 1 from public.terminal_checkouts c
                          where c.session_id = p.id and c.status in ('PENDING', 'IN_PROGRESS', 'CANCEL_REQUESTED')) as on_terminal
           from public.sessions p
@@ -233,7 +236,7 @@ async function loadSessions(q: Db, where: postgres.Fragment): Promise<SessionDTO
   const partsByParent = new Map<string, PartDTO[]>();
   for (const p of parts) {
     const list = partsByParent.get(p.split_of) ?? [];
-    list.push({ id: p.id, amountCents: p.total_cents ?? 0, status: p.status, onTerminal: p.on_terminal });
+    list.push({ id: p.id, amountCents: p.total_cents ?? 0, customerName: p.customer_name, status: p.status, onTerminal: p.on_terminal });
     partsByParent.set(p.split_of, list);
   }
 
@@ -263,6 +266,7 @@ async function loadSessions(q: Db, where: postgres.Fragment): Promise<SessionDTO
     label: labelOf(r.kind, bySession.get(r.id) ?? [], itemsBySession.get(r.id) ?? []),
     status: r.status,
     currentTableId: r.current_table_id,
+    customerName: r.customer_name,
     openedAt: r.opened_at.toISOString(),
     openedByName: r.opened_by_name,
     closedAt: iso(r.closed_at),
@@ -482,6 +486,18 @@ export async function getSessionDetail(id: string): Promise<SessionDetailDTO> {
 
 const DATE_RE = /^(\d{4})-(\d{2})-(\d{2})$/;
 
+/** "2026-11-23" → its parts. 400 unless it is a real calendar date. */
+export function parseYMD(text: string, what = "date"): LocalYMD {
+  const m = DATE_RE.exec(text);
+  const ymd = m ? { y: Number(m[1]), m: Number(m[2]), d: Number(m[3]) } : null;
+  // Date.UTC rolls 31 February over into March; a date that doesn't survive the round trip isn't one.
+  const back = ymd ? new Date(Date.UTC(ymd.y, ymd.m - 1, ymd.d)) : null;
+  if (!ymd || !back || back.getUTCFullYear() !== ymd.y || back.getUTCMonth() !== ymd.m - 1 || back.getUTCDate() !== ymd.d) {
+    throw badRequest(`${what} must be YYYY-MM-DD`);
+  }
+  return ymd;
+}
+
 interface SummaryRow {
   id: string;
   kind: BillKind;
@@ -490,43 +506,25 @@ interface SummaryRow {
   billed_minutes: number | null;
   total_cents: number | null;
   table_names: string;
+  customer_name: string | null;
+  note: string | null;
 }
 
-export async function getSummary(dateParam: string | null): Promise<SummaryDTO> {
-  const q = db();
-  const settings = await getSettings(q);
-  const tz = settings.timezone;
+export interface BilledRow {
+  count: number;
+  minutes: number;
+  cents: number;
+  items_cents: number;
+  discount_cents: number;
+  written_off_cents: number;
+}
 
-  let date: { y: number; m: number; d: number };
-  if (dateParam) {
-    const m = DATE_RE.exec(dateParam);
-    if (!m) throw badRequest("date must be YYYY-MM-DD");
-    date = { y: Number(m[1]), m: Number(m[2]), d: Number(m[3]) };
-  } else {
-    date = currentBusinessDate(new Date(), settings.businessDayStartMinute, tz);
-  }
-  const { from, to } = businessWindow(date, settings.businessDayStartMinute, tz);
-
-  // Table names for a table's bill; "Counter sale" or "Table 3 · share" otherwise.
-  const tableNamesSql = q`${billLabelSql(q)} as table_names`;
-
-  const [closed, itemsSold, paid, unpaid, older, voids, attention] = await Promise.all([
-    // Every bill that isn't void counts for what it is owed: a table's bill, a counter sale, and
-    // each part on its own. A split bill and its parts therefore add up to the bill before the
-    // split, a share or a remainder a manager voided drops out, and a merged-back part (void)
-    // was never in. Sessions, minutes, items and discounts are counted on table and counter bills
-    // only: a part is a share of one of those, not a bill of its own.
-    //
-    // A part counts on the business day of the bill it was split from (`p`), whenever the split
-    // itself happened: splitting yesterday's unpaid bill this morning must not move money between
-    // two days' figures. (Two halves so each can use an index: bills by their own closed_at, parts
-    // through the bill they came from.)
-    //
-    // `written_off` marks a share a manager voided on a bill that itself still counts. Its money
-    // is not billed, but the bill's items and discount are still counted whole, so it has to be
-    // shown as its own figure or the missing money would come out of table time (and could take
-    // it below zero).
-    q<{ count: number; minutes: number; cents: number; items_cents: number; discount_cents: number; written_off_cents: number }[]>`
+/**
+ * What was billed on the bills closed in [from, to): the figures behind `SummaryDTO.sessions`.
+ * The rules are spelled out where the daily summary calls this.
+ */
+export function billedTotals(q: Db, from: Date, to: Date): Promise<BilledRow[]> {
+  return q<BilledRow[]>`
       select count(*) filter (where b.kind <> 'part')::int as count,
              coalesce(sum(b.billed_minutes) filter (where b.kind <> 'part'), 0)::int as minutes,
              coalesce(sum(b.total_cents) filter (where not b.written_off), 0)::int as cents,
@@ -542,7 +540,37 @@ export async function getSummary(dateParam: string | null): Promise<SummaryDTO> 
         from public.sessions p join public.sessions s on s.split_of = p.id
         where p.closed_at >= ${from} and p.closed_at < ${to}
           and (s.status <> 'void' or (not s.merged and p.status <> 'void'))
-      ) b`,
+      ) b`;
+}
+
+export async function getSummary(dateParam: string | null): Promise<SummaryDTO> {
+  const q = db();
+  const settings = await getSettings(q);
+  const tz = settings.timezone;
+
+  const date = dateParam ? parseYMD(dateParam) : currentBusinessDate(new Date(), settings.businessDayStartMinute, tz);
+  const { from, to } = businessWindow(date, settings.businessDayStartMinute, tz);
+
+  // Table names for a table's bill; "Counter sale" or "Table 3 · share" otherwise.
+  const tableNamesSql = q`${billLabelSql(q)} as table_names`;
+
+  const [closed, itemsSold, paid, unpaid, older, voids, attention, [lastClose]] = await Promise.all([
+    // Every bill that isn't void counts for what it is owed: a table's bill, a counter sale, and
+    // each part on its own. A split bill and its parts therefore add up to the bill before the
+    // split, a share or a remainder a manager voided drops out, and a merged-back part (void)
+    // was never in. Sessions, minutes, items and discounts are counted on table and counter bills
+    // only: a part is a share of one of those, not a bill of its own.
+    //
+    // A part counts on the business day of the bill it was split from (`p`), whenever the split
+    // itself happened: splitting yesterday's unpaid bill this morning must not move money between
+    // two days' figures. (Two halves so each can use an index: bills by their own closed_at, parts
+    // through the bill they came from.)
+    //
+    // `written_off` marks a share a manager voided on a bill that itself still counts. Its money
+    // is not billed, but the bill's items and discount are still counted whole, so it has to be
+    // shown as its own figure or the missing money would come out of table time (and could take
+    // it below zero).
+    billedTotals(q, from, to),
     // What was sold on those same table and counter bills. Catalogue items are grouped by product
     // (the name is the latest one used); custom charges have no product and are grouped by the
     // name staff typed, ignoring capitals and stray spaces. A part's one line is its share of a
@@ -565,15 +593,15 @@ export async function getSummary(dateParam: string | null): Promise<SummaryDTO> 
           settled_by_name: string | null;
         })[]
     >`
-      select s.id, s.kind, s.opened_at, s.closed_at, s.billed_minutes, s.total_cents, s.settled_method, s.settled_via,
-             s.settled_at, s.settled_cents, sb.name as settled_by_name, ${cashColumnsSql(q)}, ${tableNamesSql}
+      select s.id, s.kind, s.opened_at, s.closed_at, s.billed_minutes, s.total_cents, s.customer_name, s.note,
+             s.settled_method, s.settled_via, s.settled_at, s.settled_cents, sb.name as settled_by_name, ${cashColumnsSql(q)}, ${tableNamesSql}
       from public.sessions s left join public.staff sb on sb.id = s.settled_by
       ${cashJoinSql(q)}
       where s.status = 'paid' and s.settled_at >= ${from} and s.settled_at < ${to}
       order by s.settled_at, s.id`,
     // Every bill still to be paid, parts included, each for what is owed on it.
     q<SummaryRow[]>`
-      select s.id, s.kind, s.opened_at, s.closed_at, s.billed_minutes, s.total_cents, ${tableNamesSql}
+      select s.id, s.kind, s.opened_at, s.closed_at, s.billed_minutes, s.total_cents, s.customer_name, s.note, ${tableNamesSql}
       from public.sessions s
       where s.status = 'awaiting_payment' and s.closed_at >= ${from} and s.closed_at < ${to}
       order by s.closed_at, s.created_at, s.id`,
@@ -587,7 +615,7 @@ export async function getSummary(dateParam: string | null): Promise<SummaryDTO> 
     //     void of a counter sale that had anything on it is always listed, whatever reason is typed.
     // Both stay in the database and in the audit log (session.merged_back / session.discard).
     q<(SummaryRow & { void_reason: string; voided_by_name: string | null })[]>`
-      select s.id, s.kind, s.opened_at, s.closed_at, s.billed_minutes, s.total_cents, s.void_reason,
+      select s.id, s.kind, s.opened_at, s.closed_at, s.billed_minutes, s.total_cents, s.customer_name, s.note, s.void_reason,
              vb.name as voided_by_name, ${tableNamesSql}
       from public.sessions s left join public.staff vb on vb.id = s.voided_by
       where s.status = 'void' and s.voided_at >= ${from} and s.voided_at < ${to}
@@ -596,6 +624,12 @@ export async function getSummary(dateParam: string | null): Promise<SummaryDTO> 
                  and coalesce(s.void_reason, '') = ${DISCARD_REASON})
       order by s.voided_at, s.id`,
     getAudit({ from, to, actions: [...ATTENTION_ACTIONS], limit: 200 }),
+    // The latest time this day was closed, if it has been (lib/server/day-close.ts).
+    q<{ closed_at: Date; closed_by_name: string; variance_cents: number; totals: DayCloseTotals }[]>`
+      select c.closed_at, cb.name as closed_by_name, c.variance_cents, c.totals
+      from public.day_closes c join public.staff cb on cb.id = c.closed_by
+      where c.business_date = ${formatYMD(date)}::date
+      order by c.seq desc limit 1`,
   ]);
   const checks = await attentionChecks(q, attention.entries.map((a) => a.id));
 
@@ -617,6 +651,8 @@ export async function getSummary(dateParam: string | null): Promise<SummaryDTO> 
     id: r.id,
     kind: r.kind,
     tableNames: r.table_names,
+    customerName: r.customer_name,
+    note: r.note,
     openedAt: r.opened_at.toISOString(),
     closedAt: iso(r.closed_at),
     billedMinutes: r.billed_minutes,
@@ -639,7 +675,7 @@ export async function getSummary(dateParam: string | null): Promise<SummaryDTO> 
   const collected = (list: { settled_cents: number }[]) => list.reduce((a, r) => a + r.settled_cents, 0);
   // Cash bills whose sale Square doesn't hold yet. A reversed-and-repaid bill counts by its latest record.
   const notInSquare = cash.filter((p) => p.cash_state === "pending" || p.cash_state === "failed");
-  return {
+  const figures = {
     businessDate: formatYMD(date),
     from: from.toISOString(),
     to: to.toISOString(),
@@ -691,5 +727,16 @@ export async function getSummary(dateParam: string | null): Promise<SummaryDTO> 
       const c = checks.get(a.id);
       return { ...a, checked: c ? { at: c.at.toISOString(), byName: c.byName } : null };
     }),
+  };
+  return {
+    ...figures,
+    close: lastClose
+      ? {
+          closedAt: lastClose.closed_at.toISOString(),
+          closedByName: lastClose.closed_by_name,
+          varianceCents: lastClose.variance_cents,
+          changedSinceClose: hasMoved(lastClose.totals, totalsOf(figures)),
+        }
+      : null,
   };
 }

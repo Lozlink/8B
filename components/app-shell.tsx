@@ -2,11 +2,12 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import type { ReactNode } from "react";
+import { useSyncExternalStore, type ReactNode } from "react";
 import { BrandMark, Button } from "@/components/ui";
 import { api } from "@/lib/client/api";
 import { FloorProvider, useFloor } from "@/lib/client/floor-context";
 import { useAction } from "@/lib/client/use-action";
+import { APP_ORIGIN, isSiteHost } from "@/lib/site/routing";
 
 const NAV = [
   { href: "/", label: "Floor" },
@@ -44,6 +45,24 @@ function DegradedBanner() {
   );
 }
 
+const never = () => () => {};
+
+/**
+ * Shown on an iPad still using the app at the old address (the public site's host). It keeps
+ * working there for now; this says where it lives and how to move.
+ */
+function MovedBanner() {
+  // The address is only known in the browser, and it never changes while the page is open.
+  const onOldHost = useSyncExternalStore(never, () => isSiteHost(window.location.host), () => false);
+  if (!onOldHost) return null;
+  return (
+    <div role="status" className="border-b border-line bg-surface-2 px-4 py-2 text-center text-base print:hidden">
+      This app has moved to <strong className="font-semibold">{APP_ORIGIN.replace("https://", "")}</strong>. Open that address in
+      Safari, add it to the Home Screen and enrol this iPad there. A manager has the code.
+    </div>
+  );
+}
+
 function Chrome({ children }: { children: ReactNode }) {
   const pathname = usePathname();
   const { me, unpaidCount, offline, degraded } = useFloor();
@@ -61,7 +80,7 @@ function Chrome({ children }: { children: ReactNode }) {
 
   return (
     <div className="flex min-h-dvh flex-col">
-      <header className="sticky top-0 z-30 border-b border-line bg-bg/95 pt-[env(safe-area-inset-top)] backdrop-blur">
+      <header className="sticky top-0 z-30 border-b border-line bg-bg/95 pt-[env(safe-area-inset-top)] backdrop-blur print:hidden">
         <div className="flex flex-wrap items-center gap-x-4 gap-y-2 px-4 py-2">
           <div className="flex min-w-0 items-center gap-2">
             <BrandMark size={32} />
@@ -102,6 +121,7 @@ function Chrome({ children }: { children: ReactNode }) {
           </Button>
         </div>
       </header>
+      <MovedBanner />
       {degraded && !offline ? <DegradedBanner /> : null}
       <main className="flex-1 px-4 py-4 pb-[calc(env(safe-area-inset-bottom)+1rem)]">{children}</main>
       {offline ? <OfflineOverlay /> : null}

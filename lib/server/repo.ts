@@ -147,6 +147,8 @@ export interface SessionRow {
   voided_at: Date | null;
   voided_by: string | null;
   void_reason: string | null;
+  /** Who the bill belongs to, as staff typed it. */
+  customer_name: string | null;
   note: string | null;
 }
 
@@ -213,6 +215,8 @@ export interface ProductRow {
   stock_at: Date | null;
   /** The item's picture in Square. */
   image_url: string | null;
+  /** What one unit costs the venue, ex GST. Manager screens only: never put it in a ProductDTO. */
+  cost_cents: number | null;
 }
 
 export interface CatalogStateRow {
@@ -330,7 +334,8 @@ export async function cashHandoffInProgress(q: Db, sessionId: string): Promise<D
 
 export async function getProducts(q: Db, opts: { activeOnly: boolean }): Promise<ProductRow[]> {
   return q<ProductRow[]>`
-    select id, item_id, name, price_cents, taxed, category, sort_order, active, barcode, sku, tracked, stock_count, stock_at, image_url
+    select id, item_id, name, price_cents, taxed, category, sort_order, active, barcode, sku, tracked, stock_count, stock_at, image_url,
+           cost_cents
     from public.products
     where ${opts.activeOnly ? q`active` : q`true`}
     order by sort_order, name, id`;

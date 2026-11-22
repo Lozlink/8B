@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { ActionDialog } from "@/components/action-dialog";
 import { PaidRowActions, RefundStats, RefundedTag, RefundsSummarySection } from "@/components/refund-summary";
@@ -13,6 +14,7 @@ import { useLoad } from "@/lib/client/use-load";
 import { authRedirect, errorMessage } from "@/lib/client/errors";
 import { useFloor } from "@/lib/client/floor-context";
 import { REOPENED_TOAST, REOPEN_SUBMIT, REOPEN_TITLE, attentionTitle, reopenBlurb } from "@/lib/client/refund-view";
+import { describeDifference } from "@/lib/client/day-close";
 import type { AttentionEntryDTO, SummaryDTO, SummarySessionRow } from "@/lib/domain/types";
 import { formatDateTime, formatTime } from "@/lib/format";
 import { formatCents } from "@/lib/pricing";
@@ -87,8 +89,24 @@ export function SummaryView() {
           <Button onClick={() => setDate(null)} disabled={date === null}>
             Today
           </Button>
+          <Link
+            href={date ? `/end-of-day?date=${encodeURIComponent(date)}` : "/end-of-day"}
+            className="inline-flex min-h-12 select-none items-center justify-center rounded-xl border border-line bg-surface-2 px-4 text-base font-semibold text-chalk transition-colors active:bg-line"
+          >
+            End of day
+          </Link>
         </div>
       </div>
+
+      {data?.close ? (
+        <p className="text-base tabular-nums">
+          <span className="font-semibold">
+            Closed {formatDateTime(data.close.closedAt, tz)} by {data.close.closedByName}.
+          </span>{" "}
+          Cash: {describeDifference(data.close.varianceCents)}.
+          {data.close.changedSinceClose ? " The figures have changed since." : ""}
+        </p>
+      ) : null}
 
       {error ? <Notice tone="danger">{error}</Notice> : null}
       {!data ? (
@@ -226,6 +244,7 @@ export function SummaryView() {
                         {v.reason}
                         {v.voidedByName ? ` · by ${v.voidedByName}` : ""}
                       </span>
+                      <BillWho row={v} />
                     </button>
                   </li>
                 ))}
@@ -254,6 +273,7 @@ export function SummaryView() {
                           {formatTime(p.settledAt, tz)} · {p.settledCents === 0 ? "nothing to pay" : p.method}
                           {p.settledByName ? ` · ${p.settledByName}` : ""}
                         </span>
+                        <BillWho row={p} />
                         {p.method === "cash" && p.squareCash?.state === "failed" ? (
                           <span className="text-sm font-semibold text-warn">Not in Square</span>
                         ) : p.method === "cash" && p.squareCash?.state === "pending" ? (
@@ -334,6 +354,18 @@ function AttentionText({ entry: a, tz }: { entry: AttentionEntryDTO; tz: string 
   );
 }
 
+/** Who a bill is for and any note on it, under the bill's main line. Nothing when neither is set. */
+function BillWho({ row }: { row: { customerName: string | null; note: string | null } }) {
+  if (!row.customerName && !row.note) return null;
+  return (
+    <span className="line-clamp-2 break-words text-sm">
+      {row.customerName ? <span className="font-semibold">{row.customerName}</span> : null}
+      {row.customerName && row.note ? <span className="text-muted"> · </span> : null}
+      {row.note ? <span className="text-muted">{row.note}</span> : null}
+    </span>
+  );
+}
+
 function Stat({ title, big, sub, warn }: { title: string; big: string; sub: ReactNode; warn?: boolean }) {
   return (
     <div className={`rounded-2xl border bg-surface p-4 ${warn ? "border-[#c18a22]" : "border-line"}`}>
@@ -377,6 +409,7 @@ function List({
                     {formatDateTime(r.openedAt, tz)}
                     {r.kind === "table" && r.billedMinutes !== null ? ` · ${r.billedMinutes} min` : ""}
                   </span>
+                  <BillWho row={r} />
                 </span>
                 <span className="text-lg font-semibold tabular-nums">{r.totalCents !== null ? formatCents(r.totalCents) : "—"}</span>
               </button>

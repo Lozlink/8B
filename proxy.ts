@@ -1,30 +1,36 @@
 import { NextResponse, type NextRequest } from "next/server";
+import { decideRoute } from "@/lib/site/routing";
 
 /**
- * Optimistic routing only (cookie presence). Real authorisation happens in every API route,
- * which verifies the signed cookies and checks the device/staff rows.
+ * Sends each page request to the public site or the staff app, by host (the rules, and why, are in
+ * lib/site/routing.ts). For the app this is optimistic routing only (cookie presence): real
+ * authorisation happens in every API route, which verifies the signed cookies and checks the
+ * device and staff rows.
  */
 export function proxy(req: NextRequest) {
-  const { pathname } = req.nextUrl;
-  const hasDevice = req.cookies.has("tt_device");
-  const hasSession = req.cookies.has("tt_session");
+  const { pathname, search } = req.nextUrl;
+  const decision = decideRoute({
+    host: req.headers.get("host"),
+    pathname,
+    search,
+    hasDevice: req.cookies.has("tt_device"),
+    hasSession: req.cookies.has("tt_session"),
+  });
 
-  // Square POS comes back here in Safari, which shares no cookies with the home-screen app. The
-  // page needs none: what it posts is checked by its own signed token.
-  if (pathname === "/pos/return") return NextResponse.next();
-
-  if (!hasDevice && pathname !== "/enrol") {
-    return NextResponse.redirect(new URL("/enrol", req.url));
+  if (decision.kind === "rewrite") {
+    const url = req.nextUrl.clone();
+    url.pathname = decision.pathname;
+    return NextResponse.rewrite(url);
   }
-  if (hasDevice && !hasSession && pathname !== "/login" && pathname !== "/enrol") {
-    return NextResponse.redirect(new URL("/login", req.url));
+  if (decision.kind === "redirect") {
+    return NextResponse.redirect(new URL(decision.to, req.url), decision.permanent ? 308 : 307);
   }
   return NextResponse.next();
 }
 
 export const config = {
-  // Pages only: skip API routes, Next internals and static/metadata files.
+  // Pages, robots.txt and sitemap.xml: skip API routes, Next internals and static/metadata files.
   matcher: [
-    "/((?!api|_next/static|_next/image|favicon.ico|manifest.webmanifest|robots.txt|icon|apple-icon|.*\\.(?:png|svg|ico|webp|jpg)$).*)",
+    "/((?!api|_next/static|_next/image|favicon.ico|manifest.webmanifest|icon|apple-icon|.*\\.(?:png|svg|ico|webp|jpg)$).*)",
   ],
 };

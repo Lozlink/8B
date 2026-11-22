@@ -73,6 +73,11 @@ describe("timeOffsetSample", () => {
   it("uses the midpoint of the round trip", () => {
     expect(timeOffsetSample(1000, 1200, 5100)).toBe(4000);
   });
+  it("is always a whole number of milliseconds", () => {
+    // 1000 → 1201: the midpoint is 1100.5. A fractional offset once took the whole floor down.
+    expect(Number.isInteger(timeOffsetSample(1000, 1201, 5100))).toBe(true);
+    expect(timeOffsetSample(1000, 1201, 5100)).toBe(4000);
+  });
   it("drops slow round trips and nonsense", () => {
     expect(timeOffsetSample(0, 2001, 5000)).toBeNull();
     expect(timeOffsetSample(0, 2000, 5000)).not.toBeNull();

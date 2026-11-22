@@ -16,7 +16,9 @@ export function toMs(v: Instant, field = "instant"): number {
   if (!Number.isFinite(ms)) {
     throw new PricingError("INVALID_INSTANT", `Invalid ${field}: ${String(v)}`, { field, value: String(v) });
   }
-  return ms;
+  // Whole milliseconds only. The sums below are exact integer arithmetic (BigInt), which throws on
+  // a fraction, and a browser's corrected clock can carry one (half a millisecond of offset).
+  return Math.floor(ms);
 }
 
 function validateSettings(s: PricingSettings): void {

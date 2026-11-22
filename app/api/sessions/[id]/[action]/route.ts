@@ -20,6 +20,7 @@ import {
   continueSession,
   resumeSession,
   reversePaid,
+  setDetails,
   setDiscount,
   splitBill,
   stopSession,
@@ -75,6 +76,10 @@ const refundBody = managerAction.extend({
 });
 const settleRefundBody = managerAction.extend({ refundId: uuid, outcome: z.enum(["refunded", "not_refunded"]) });
 
+// Lengths are checked by setDetails (40 and 200 characters), which says so in words.
+// A field left out is left as it is; null clears it.
+const detailsBody = z.object({ customerName: z.string().max(500).nullable().optional(), note: z.string().max(2000).nullable().optional() });
+
 const OK = { ok: true as const };
 
 export const POST = handler(async (req: Request, ctx: RouteContext<"/api/sessions/[id]/[action]">) => {
@@ -91,6 +96,11 @@ export const POST = handler(async (req: Request, ctx: RouteContext<"/api/session
     case "transfer": {
       const b = await readJson(req, transferBody);
       await transferSession(actor, id, b.tableId);
+      return ok(OK);
+    }
+    case "set-details": {
+      const b = await readJson(req, detailsBody);
+      await setDetails(actor, id, b);
       return ok(OK);
     }
     case "stop":

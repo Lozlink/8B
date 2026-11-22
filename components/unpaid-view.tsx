@@ -62,7 +62,11 @@ export function UnpaidView() {
                   className="flex min-h-20 w-full items-center justify-between gap-4 rounded-2xl border-2 border-[#c18a22] bg-surface p-4 text-left active:bg-surface-2"
                 >
                   <span className="flex min-w-0 flex-col gap-0.5">
-                    <span className="truncate text-xl font-bold">{billName(s)}</span>
+                    <span className="flex min-w-0 items-baseline gap-2 text-xl font-bold">
+                      <span className={`truncate ${s.customerName ? "max-w-[55%] shrink-0" : ""}`}>{billName(s)}</span>
+                      {s.customerName ? <span className="min-w-0 truncate">· {s.customerName}</span> : null}
+                    </span>
+                    {s.note ? <span className="truncate text-base text-muted">{s.note}</span> : null}
                     <span className="text-base text-muted tabular-nums">
                       {span.start ? formatDateTime(span.start, tz) : "—"}
                       {span.end ? ` – ${formatTime(span.end, tz)}` : ""}

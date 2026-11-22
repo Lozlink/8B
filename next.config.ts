@@ -5,8 +5,17 @@ const securityHeaders = [
   { key: "X-Content-Type-Options", value: "nosniff" },
   { key: "Referrer-Policy", value: "same-origin" },
   { key: "Permissions-Policy", value: "camera=(), microphone=(), geolocation=()" },
-  { key: "X-Robots-Tag", value: "noindex, nofollow" },
 ];
+
+// The staff app is kept out of search engines on every host it answers on. The public site's host
+// is the one exception (lib/site/routing.ts): the pages it serves to visitors are meant to be found.
+// `missing` conditions must all hold, so this header is left off only there.
+const publicHosts = ["8balllounge.com.au", "www.8balllounge.com.au"];
+const keepOutOfSearch = {
+  source: "/:path*",
+  missing: publicHosts.map((value) => ({ type: "host" as const, value })),
+  headers: [{ key: "X-Robots-Tag", value: "noindex, nofollow" }],
+};
 
 const nextConfig: NextConfig = {
   cacheComponents: true,
@@ -29,7 +38,7 @@ const nextConfig: NextConfig = {
     },
   },
   async headers() {
-    return [{ source: "/:path*", headers: securityHeaders }];
+    return [{ source: "/:path*", headers: securityHeaders }, keepOutOfSearch];
   },
 };
 

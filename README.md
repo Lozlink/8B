@@ -20,7 +20,9 @@ lib/server/        Auth, sessions service (every transition), queries, admin, au
 lib/square/        Square client, Terminal checkout calls, webhook signature check
 lib/client/        Browser-side API client (api.ts is the server/UI contract) and hooks
 app/api/           Route handlers (thin wrappers around lib/server)
-app/…              Screens: floor (/), /unpaid, /summary, /admin, /login, /enrol
+app/…              Screens: floor (/), /unpaid, /summary, /end-of-day, /admin, /login, /enrol
+app/site/          The public site (served at the root of 8balllounge.com.au)
+lib/site/          Which host serves what (routing.ts) and the public site's facts and copy (content.ts)
 supabase/          Migrations, local seed, CLI config
 docs/BRIEF.md      Owner's brief
 docs/SQUARE.md     Square behaviour, VERIFY answers, sandbox device IDs
@@ -60,6 +62,7 @@ pnpm typecheck && pnpm lint
 
 1. Create the project in **Sydney** (ap-southeast-2).
 2. Run `supabase link`, then `supabase db push`. This applies the migrations. Don't push `seed.sql`: it sets a local-only password.
+   **Always apply a new migration before deploying the code that needs it.** Migrations here are additive, so the live release keeps working once one has run; the new code does not work without it (the floor screen reads the new columns).
 3. Give the server role a real password. In the SQL editor, run:
    ```sql
    alter role timer_app with login password '<long random password>';
@@ -77,7 +80,25 @@ Secrets live in git as the dotenvx-encrypted `.env.production`. `@dotenvx/next-e
 
 `DATABASE_URL` must use Supabase's **transaction pooler**, which has an IPv4 address. The direct `db.<ref>.supabase.co` host is IPv6-only, and Vercel functions can't reach it.
 
-Vercel Authentication is on for `*.vercel.app` URLs, so the iPads and Square's webhook must use the custom domain, `https://8balllounge.com.au`.
+Vercel Authentication is on for `*.vercel.app` URLs, so the iPads and Square's webhook must use a custom domain.
+
+### Domains
+
+One Vercel project answers on both hosts; `proxy.ts` decides what each request gets (the rules are in `lib/site/routing.ts`).
+
+| Host | Serves |
+|---|---|
+| `8balllounge.com.au` | The public site, for customers and search engines. `www` redirects here. |
+| `app.8balllounge.com.au` | The staff app. Kept out of search engines. |
+
+The app used to live on `8balllounge.com.au`. An iPad enrolled there carries a device cookie for that host and keeps getting the app there, with a banner saying where it has moved. Everyone else on that host gets the public site. So the order of the steps below doesn't matter and nothing stops working part-way:
+
+1. In Vercel, add `app.8balllounge.com.au` to the project (and `www.8balllounge.com.au` if it isn't there), and add the DNS record Vercel shows.
+2. On each iPad: open `https://app.8balllounge.com.au` in Safari, Add to Home Screen, open it from the new icon and enrol. Delete the old icon. In Admin → Devices, revoke the old entry for that iPad.
+3. In the Square Developer Console, change the Point of Sale API **Web Callback URL** to `https://app.8balllounge.com.au/pos/return`, and set `APP_ORIGIN=https://app.8balllounge.com.au` (`pnpm exec dotenvx set APP_ORIGIN "https://app.8balllounge.com.au" -f .env.production`). Do both together: the cash hand-off to Square POS stops working if they differ.
+4. The webhook can stay where it is. API routes answer on both hosts, and `SQUARE_WEBHOOK_URL` only has to match the subscription in Square. If you move the subscription, change both at once.
+
+The public site's facts and wording are in `lib/site/content.ts`. Opening hours, phone and social links are left empty there and stay off the page until they are filled in.
 
 Only `DATABASE_URL`, `SESSION_SECRET` and `DEVICE_ENROL_CODE` are needed for the app to run:
 - Without the `SQUARE_*` Terminal settings, Charge card and pairing say "not set up", and staff use Square POS plus Mark paid.
@@ -94,7 +115,7 @@ Only `DATABASE_URL`, `SESSION_SECRET` and `DEVICE_ENROL_CODE` are needed for the
 
 ### iPads
 
-1. On each iPad, open the site in Safari.
+1. On each iPad, open `https://app.8balllounge.com.au` in Safari.
 2. Tap Share → **Add to Home Screen** first.
 3. Open the app from the home-screen icon and enrol it there, with the code and its label ("Counter", "Floor 1" or "Floor 2").
 
@@ -130,6 +151,12 @@ Home-screen apps keep cookies separate from Safari. An iPad enrolled in Safari m
 - **Leave unpaid** frees the table and moves the bill to the Unpaid list.
 
 **Launch fallback:** if the Terminal push isn't ready, leave the Terminal unpaired. Staff key the amount into Square POS ("Table hire", variable price) and tap Mark paid. Everything else works the same.
+
+## Names, costs and closing the day
+
+- **Names and notes.** Any open bill can carry a customer's name and a note (tap the name on a table card, or open the bill). The name follows the bill when it moves tables, onto the Unpaid list and the summary, and leads the note Square shows against the sale. A share of a split bill can be named too.
+- **Costs.** Admin → Items holds what each product costs, ex GST. Costs stay in the app: Square is never told. The cost is copied onto each bill line when the item is sold, so changing a cost later doesn't change the profit on past sales. Sales made before a cost was entered use the product's cost now. Admin → Profit reports sales ex GST, cost, profit and margin for any dates. Costs and profit are only ever sent to a manager's screen.
+- **End of day.** Summary → End of day. Refuses while a table is running. Staff enter the float and count the drawer; the app compares it with float + cash taken − cash refunded and records the difference, with the day's figures as they stood. A close is never changed. If the day moves afterwards (a late sale), the screen says so and a manager can close it again with a reason. Closing locks nothing: bills can still be taken.
 
 ## Security and record-keeping
 

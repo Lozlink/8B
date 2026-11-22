@@ -3,6 +3,7 @@
 import { useCallback, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { ActionDialog } from "@/components/action-dialog";
+import { BillDetailsSection } from "@/components/bill-details";
 import { AdjustmentRows } from "@/components/bill-rows";
 import { DiscountPanel } from "@/components/discount-panel";
 import { EditTimesDialog } from "@/components/edit-times-dialog";
@@ -15,7 +16,7 @@ import { api } from "@/lib/client/api";
 import { useLoad } from "@/lib/client/use-load";
 import { authRedirect, errorMessage } from "@/lib/client/errors";
 import { useFloor, useServerNow } from "@/lib/client/floor-context";
-import { billCan, billName, billOf, discountBase, groupItems, lineLabel } from "@/lib/client/bill-view";
+import { billCan, billOf, billTitle, discountBase, groupItems, lineLabel } from "@/lib/client/bill-view";
 import {
   HAS_REFUNDS_NOTE,
   REOPENED_TOAST,
@@ -93,7 +94,7 @@ export function SessionDetailSheet({ sessionId, onClose, onCharge }: Props) {
   const billNow = detail ? billOf(detail, running ? (liveEst ? liveEst.totalCents : null) : undefined) : null;
 
   return (
-    <Sheet title={s ? billName(s) : "Session"} onClose={onClose} size="lg">
+    <Sheet title={s ? billTitle(s) : "Session"} onClose={onClose} size="lg">
       {!detail || !s ? (
         error ? (
           <div className="flex flex-col gap-3">
@@ -126,6 +127,8 @@ export function SessionDetailSheet({ sessionId, onClose, onCharge }: Props) {
             {s.status === "awaiting_payment" ? <span className="font-semibold text-warn">{checkoutLabel(s).label}</span> : null}
           </div>
 
+          <BillDetailsSection session={s} onSaved={load} />
+
           <dl className="grid grid-cols-1 gap-x-6 gap-y-2 text-base sm:grid-cols-2">
             <Fact label="Opened" value={`${formatDateTime(s.openedAt, tz)} by ${s.openedByName}`} />
             {s.closedAt && s.kind === "table" ? <Fact label="Closed" value={formatDateTime(s.closedAt, tz)} /> : null}
@@ -146,7 +149,6 @@ export function SessionDetailSheet({ sessionId, onClose, onCharge }: Props) {
             ) : null}
             {s.settledMethod === "cash" && s.squareCash ? <SquareCashFact cash={s.squareCash} /> : null}
             {s.voidReason ? <Fact label="Void reason" value={s.voidReason} /> : null}
-            {s.note ? <Fact label="Note" value={s.note} /> : null}
           </dl>
 
           <PaidBillActions session={s} onChanged={changed} stale={error !== null} />

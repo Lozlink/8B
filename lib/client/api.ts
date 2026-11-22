@@ -19,10 +19,13 @@
 import type {
   AdminStateDTO,
   AuditEntryDTO,
+  DayCloseDTO,
+  DayCloseStateDTO,
   FloorDTO,
   MarkPaidOutcome,
   MeDTO,
   PairingCodeDTO,
+  ProfitReportDTO,
   RefundDTO,
   SessionDetailDTO,
   SessionDTO,
@@ -124,7 +127,18 @@ export const api = {
 
   // --- floor & sessions -----------------------------------------------------
   floor: () => get<FloorDTO>("/api/floor"),
-  start: (tableId: string) => post<{ sessionId: string }>("/api/sessions", { tableId }),
+  /** `who` is optional: a name (up to 40 characters) and a note (up to 200) for the new bill. */
+  start: (tableId: string, who?: { customerName?: string; note?: string }) =>
+    post<{ sessionId: string }>("/api/sessions", { tableId, ...who }),
+  /**
+   * Sets who a bill belongs to and the note on it. Send only what the person changed: a string
+   * sets it (trimmed; name up to 40 characters, note up to 200), null or "" clears it, and a field
+   * left out is left as it is (so two iPads changing different fields don't undo each other). Any staff member,
+   * on any kind of bill (a table, a counter sale, a share of a split bill) while it is running,
+   * paused or awaiting payment. It never changes what is owed. 409 once the bill is paid or void.
+   */
+  setDetails: (id: string, details: { customerName?: string | null; note?: string | null }) =>
+    post<{ ok: true }>(`/api/sessions/${enc(id)}/set-details`, details),
   unpaid: () => get<{ sessions: SessionDTO[]; timezone: string }>("/api/sessions/unpaid"),
   session: (id: string) => get<SessionDetailDTO>(`/api/sessions/${enc(id)}`),
 
@@ -302,6 +316,42 @@ export const api = {
   checkAttention: (entryId: string, managerPin: string) =>
     post<{ ok: true }>("/api/summary/attention", { entryId, managerPin }),
 
+  // --- end of day ---------------------------------------------------------------
+  /** date = local business date YYYY-MM-DD; omit for the business day running now. */
+  dayClose: (date?: string) => get<DayCloseStateDTO>(`/api/day-close${date ? `?date=${enc(date)}` : ""}`),
+  /** The last 60 closes, newest first (one row per time a day was closed). */
+  dayCloses: () => get<{ closes: DayCloseDTO[] }>("/api/day-close?history=1"),
+  /**
+   * Closes a business day: records the cash counted against the cash the app expects and keeps the
+   * day's figures as they stand. Nothing is locked: bills can still be taken afterwards (the screen
+   * then shows the day has moved since it was closed).
+   *   date               — omit for the business day running now; a future date is refused.
+   *   floatCents         — cash in the drawer before the first sale.
+   *   countedCashCents   — what is in the drawer now, float included.
+   *   cashCounts         — optional: face value in cents → how many. Must add up to countedCashCents.
+   *   expectedTakingsCents — `DayCloseStateDTO.totals.takingsCents` as the screen showed it.
+   *   expectedCashMovementCents — `DayCloseStateDTO.cashMovementCents` as the screen showed it.
+   *                        Send both. If either has moved since, 409 `day_changed` and nothing is
+   *                        written: reload and show the new figures.
+   * Any staff member can make the first close of today or yesterday. `managerPin` and `reason` are
+   * needed when `DayCloseStateDTO.needsManager` is true: the day is already closed (409
+   * `already_closed` without them) or it is older than yesterday (409 `needs_manager`).
+   * Sending the same close twice within two minutes (a lost answer, a second iPad) answers with
+   * the close already made and writes nothing.
+   *   409 `tables_running` — current day only: a table is still running or paused.
+   */
+  closeDay: (body: {
+    date?: string;
+    floatCents: number;
+    countedCashCents: number;
+    cashCounts?: Record<string, number>;
+    note?: string;
+    expectedTakingsCents?: number;
+    expectedCashMovementCents?: number;
+    managerPin?: string;
+    reason?: string;
+  }) => post<{ close: DayCloseDTO }>("/api/day-close", body),
+
   // --- admin (requires elevation cookie from adminElevate) -------------------
   adminElevate: (pin: string) =>
     post<{ manager: { id: string; name: string }; expiresInSeconds: number }>("/api/admin/elevate", { pin }),
@@ -361,6 +411,19 @@ export const api = {
    * Answers with what is still outstanding afterwards.
    */
   adminRetryStock: () => post<{ pending: number; failed: number }>("/api/admin/products", { op: "stock-retry" }),
+  /**
+   * Sets what products cost the venue, EX GST, in whole cents (0 to $10,000); null clears one.
+   * Up to 500 at a time. Unknown product ids are a 400 and nothing is saved. Costs stay in the
+   * app: Square is not told. `changed` is how many were different from what was there.
+   */
+  adminSetCosts: (costs: { productId: string; costCents: number | null }[]) =>
+    post<{ changed: number }>("/api/admin/products", { op: "costs", costs }),
+  /**
+   * Profit on items sold between two business dates (YYYY-MM-DD, both included, at most 366 days).
+   * Leave both out for the business day running now.
+   */
+  adminProfit: (from?: string, to?: string) =>
+    get<ProfitReportDTO>(`/api/admin/profit${from && to ? `?from=${enc(from)}&to=${enc(to)}` : ""}`),
   /** Turns itemised Square charges on or off. */
   adminItemise: (enabled: boolean, reason: string) =>
     post<{ ok: true }>("/api/admin/products", { op: "itemise", enabled, reason }),

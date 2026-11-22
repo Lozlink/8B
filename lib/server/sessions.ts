@@ -302,12 +302,35 @@ async function refuseDuringCashHandoff(tx: Tx, s: SessionRow, which = "this bill
 // Start / pause / resume / transfer / stop / release
 // ---------------------------------------------------------------------------
 
-export async function startSession(actor: Actor, tableId: string, now = new Date()): Promise<{ sessionId: string }> {
+export const CUSTOMER_NAME_MAX = 40;
+export const BILL_NOTE_MAX = 200;
+
+/**
+ * What staff typed for a name or a note, made fit to keep: line breaks and runs of spaces become
+ * one space, the ends are trimmed, and nothing at all becomes null. Too long is refused rather
+ * than cut, so what is saved is always what staff saw.
+ */
+function cleanText(raw: string | null | undefined, max: number, what: string): string | null {
+  // Control characters (a pasted tab, a stray newline) would break the one-line places this shows.
+  const t = (raw ?? "").replace(/[\u0000-\u001f\u007f]+/g, " ").replace(/\s+/g, " ").trim();
+  if (t === "") return null;
+  if (t.length > max) throw badRequest(`${what} can be ${max} characters at most.`);
+  return t;
+}
+
+export interface BillDetails {
+  customerName?: string | null;
+  note?: string | null;
+}
+
+export async function startSession(actor: Actor, tableId: string, now = new Date(), who: BillDetails = {}): Promise<{ sessionId: string }> {
+  const customerName = cleanText(who.customerName, CUSTOMER_NAME_MAX, "A name");
+  const note = cleanText(who.note, BILL_NOTE_MAX, "A note");
   return withTx(async (tx) => {
     const table = await lockFreeTable(tx, tableId);
     const [s] = await tx<SessionRow[]>`
-      insert into public.sessions (status, current_table_id, opened_at, opened_by)
-      values ('running', ${table.id}, ${now}, ${actor.staffId})
+      insert into public.sessions (status, current_table_id, opened_at, opened_by, customer_name, note)
+      values ('running', ${table.id}, ${now}, ${actor.staffId}, ${customerName}, ${note})
       returning *`;
     await tx`
       insert into public.session_intervals (session_id, table_id, started_at)
@@ -320,6 +343,42 @@ export async function startSession(actor: Actor, tableId: string, now = new Date
       after: { ...auditView(s), table: table.name },
     });
     return { sessionId: s.id };
+  });
+}
+
+/**
+ * Sets who a bill belongs to and the note on it. Any staff member, on any kind of bill, while it
+ * is open. A field that is left out (undefined) is left as it is, so two iPads changing different
+ * fields don't undo each other; null or "" clears it. Nothing about the money moves, so it is
+ * allowed with a card request on the Terminal and during a Square POS cash hand-off.
+ */
+export async function setDetails(actor: Actor, id: string, details: BillDetails): Promise<void> {
+  const newName = details.customerName === undefined ? undefined : cleanText(details.customerName, CUSTOMER_NAME_MAX, "A name");
+  const newNote = details.note === undefined ? undefined : cleanText(details.note, BILL_NOTE_MAX, "A note");
+  await withTx(async (tx) => {
+    const s = await mustLock(tx, id);
+    assertCan(s.status, "set_details");
+    const customerName = newName === undefined ? s.customer_name : newName;
+    const note = newNote === undefined ? s.note : newNote;
+    // Saving what is already there writes nothing: no audit row, and no floor refresh on every iPad.
+    if (s.customer_name === customerName && s.note === note) return;
+    // The name is part of what a card request says to Square (`sessionNote`). A request that timed
+    // out may be sitting in Square under the current attempt's idempotency key; sent again with a
+    // different name it would be refused as a changed body. So a new name on a totalled bill skips
+    // an attempt number, exactly as a change to its lines does.
+    const skipAttempt = s.status === "awaiting_payment" && s.customer_name !== customerName ? 1 : 0;
+    await tx`
+      update public.sessions
+      set customer_name = ${customerName}, note = ${note}, checkout_attempt = checkout_attempt + ${skipAttempt}
+      where id = ${id}`;
+    await audit(tx, {
+      ...by(actor),
+      action: "session.details",
+      entity: "session",
+      entityId: id,
+      before: { customer_name: s.customer_name, note: s.note },
+      after: { customer_name: customerName, note },
+    });
   });
 }
 
@@ -786,16 +845,20 @@ export function buildNote(tables: string[], billedMinutes: number, openedAt: Dat
  * A counter sale or a part has no table time: its note is what it is and when ("Counter sale · 19:42").
  */
 export async function sessionNote(tx: Tx, s: SessionRow, intervals: IntervalRow[], billedMinutes: number): Promise<string> {
+  // The customer's name leads, so the sale can be found by it in Square as well.
+  const named = (rest: string) => (s.customer_name ? `${s.customer_name} · ${rest}` : rest);
   if (s.kind !== "table") {
     const { timezone } = await getSettings(tx);
-    return [await billLabel(tx, s), formatTime(s.opened_at, timezone)].join(" · ");
+    return named([await billLabel(tx, s), formatTime(s.opened_at, timezone)].join(" · "));
   }
-  return buildNote(
-    await tablesUsed(tx, intervals),
-    billedMinutes,
-    s.opened_at,
-    s.closed_at,
-    s.rate_snapshot?.settings.timezone ?? "Australia/Sydney",
+  return named(
+    buildNote(
+      await tablesUsed(tx, intervals),
+      billedMinutes,
+      s.opened_at,
+      s.closed_at,
+      s.rate_snapshot?.settings.timezone ?? "Australia/Sydney",
+    ),
   );
 }
 
@@ -1286,8 +1349,8 @@ export async function addItem(actor: Actor, id: string, productId: string, quant
     assertCan(s.status, "add_item");
     await requireOpenToChange(tx, s);
 
-    const [product] = await tx<{ id: string; name: string; price_cents: number; taxed: boolean; active: boolean }[]>`
-      select id, name, price_cents, taxed, active from public.products where id = ${productId}`;
+    const [product] = await tx<{ id: string; name: string; price_cents: number; taxed: boolean; active: boolean; cost_cents: number | null }[]>`
+      select id, name, price_cents, taxed, active, cost_cents from public.products where id = ${productId}`;
     if (!product) throw notFound("That item isn't on the list.");
     if (!product.active) throw conflict(`${product.name} isn't for sale any more. Pick something else.`);
 
@@ -1298,6 +1361,8 @@ export async function addItem(actor: Actor, id: string, productId: string, quant
       unitCents: product.price_cents,
       quantity,
       taxed: product.taxed,
+      // Copied like the price: a later change to the cost doesn't rewrite this sale's profit.
+      unitCostCents: product.cost_cents,
     });
   });
 }
@@ -1320,7 +1385,7 @@ export async function addCustomItem(actor: Actor, id: string, nameIn: string, am
     const s = await mustLock(tx, id);
     assertCan(s.status, "add_item");
     await requireOpenToChange(tx, s);
-    return putLineOnBill(tx, s, actor, { kind: "custom", productId: null, name, unitCents: amountCents, quantity: 1, taxed: true });
+    return putLineOnBill(tx, s, actor, { kind: "custom", productId: null, name, unitCents: amountCents, quantity: 1, taxed: true, unitCostCents: null });
   });
 }
 
@@ -1337,6 +1402,8 @@ interface NewLine {
   unitCents: number;
   quantity: number;
   taxed: boolean;
+  /** What one unit costs the venue (ex GST) right now. Null = unknown, and always for a custom charge. */
+  unitCostCents: number | null;
 }
 
 /** Puts one line on a bill and brings the bill's sums into line. Caller holds the lock and has checked the status. */
@@ -1351,8 +1418,9 @@ async function putLineOnBill(tx: Tx, s: SessionRow, actor: Actor, line: NewLine)
   if (itemsCents > MAX_ITEMS_CENTS) throw conflict("That's more than one bill can hold.");
 
   const [item] = await tx<{ id: string }[]>`
-    insert into public.session_items (session_id, kind, product_id, name, unit_cents, quantity, taxed, added_by)
-    values (${s.id}, ${line.kind}, ${line.productId}, ${line.name}, ${line.unitCents}, ${line.quantity}, ${line.taxed}, ${actor.staffId})
+    insert into public.session_items (session_id, kind, product_id, name, unit_cents, quantity, taxed, added_by, unit_cost_cents)
+    values (${s.id}, ${line.kind}, ${line.productId}, ${line.name}, ${line.unitCents}, ${line.quantity}, ${line.taxed}, ${actor.staffId},
+            ${line.unitCostCents})
     returning id`;
   // A bill that is already totalled moves with it (and a percentage discount with that), and skips
   // an attempt number so the new amount can never reuse an idempotency key Square has seen.

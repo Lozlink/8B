@@ -124,6 +124,15 @@ describe("price — basics", () => {
     expect(r.totalCents).toBe(2917);
   });
 
+  it("a `now` with a fraction of a millisecond is priced, not thrown (a browser's corrected clock)", () => {
+    const start = Date.parse("2026-11-21T08:00:00Z");
+    const at = (now: number) => price({ intervals: [iv("2026-11-21T08:00:00Z", null)], rateCards: [STANDARD], settings: SETTINGS, now });
+    const whole = at(start + 900);
+    const half = at(start + 900.5);
+    expect(half.totalCents).toBeGreaterThan(0);
+    expect(half).toEqual(whole);
+  });
+
   it("open interval with `now` slightly before start (client clock skew) counts as zero", () => {
     const r = run([iv("2026-11-21T08:00:00Z", null)], { now: "2026-11-21T07:59:58Z" });
     expect(r.actualMs).toBe(0);

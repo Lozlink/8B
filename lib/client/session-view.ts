@@ -33,13 +33,28 @@ export function checkoutLabel(session: SessionDTO): { label: string; tone: Check
   return { label: "Not charged yet", tone: "muted" };
 }
 
-/** "Table 2 → Table 5" in order of use, without repeats of adjacent names. */
-export function sessionTableNames(session: Pick<SessionDTO, "intervals">): string {
+/** Table names in the order they were used, without repeats of adjacent names. */
+function tableNamesInOrder(session: Pick<SessionDTO, "intervals">): string[] {
+  const ordered = session.intervals.slice().sort((a, b) => Date.parse(a.startedAt) - Date.parse(b.startedAt));
   const names: string[] = [];
-  for (const i of session.intervals) {
+  for (const i of ordered) {
     if (names[names.length - 1] !== i.tableName) names.push(i.tableName);
   }
-  return names.join(" → ");
+  return names;
+}
+
+/** "Table 2 → Table 5" in order of use, without repeats of adjacent names. */
+export function sessionTableNames(session: Pick<SessionDTO, "intervals">): string {
+  return tableNamesInOrder(session).join(" → ");
+}
+
+/**
+ * "Moved from Table 3": the table a bill was on just before the one it is on now. Null when it has
+ * only been on one table. (3 to 5 to 3 reads "Moved from Table 5".)
+ */
+export function movedFrom(session: Pick<SessionDTO, "intervals">): string | null {
+  const names = tableNamesInOrder(session);
+  return names.length > 1 ? `Moved from ${names[names.length - 2]}` : null;
 }
 
 export function sessionSpan(session: SessionDTO): { start: string | null; end: string | null } {

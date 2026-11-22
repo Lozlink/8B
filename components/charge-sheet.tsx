@@ -6,6 +6,7 @@ import { ActionDialog } from "@/components/action-dialog";
 import { AdjustmentRows } from "@/components/bill-rows";
 import { DiscountPanel } from "@/components/discount-panel";
 import { ItemsPanel } from "@/components/items-panel";
+import { BillDetailsSection } from "@/components/bill-details";
 import { NextBillButton, PartHeader, PartsPanel, SplitButton } from "@/components/split-panel";
 import { ReceiptButton } from "@/components/receipt-button";
 import { Badge, Button, Notice, Sheet, Spinner } from "@/components/ui";
@@ -19,7 +20,7 @@ import { useAction } from "@/lib/client/use-action";
 import { isCheckoutLive } from "@/lib/domain/machine";
 import type { SessionDetailDTO } from "@/lib/domain/types";
 import { formatCents } from "@/lib/pricing";
-import { billName, billOf, canContinue, discountBase, groupItems, isEmptyCounterSale, lineLabel } from "@/lib/client/bill-view";
+import { billOf, billTitle, canContinue, discountBase, groupItems, isEmptyCounterSale, lineLabel } from "@/lib/client/bill-view";
 import { cashDueCents } from "@/lib/domain/bill";
 import { checkoutLabel } from "@/lib/client/session-view";
 import { inSplit, nextUnpaidBill, type NextBill } from "@/lib/client/split-view";
@@ -331,7 +332,7 @@ function ChargeSheetBody({
   const handleContinue = async (countGap: boolean) => {
     const r = await run(() => api.continueSession(sessionId, countGap));
     if (r) {
-      toast.show(`${session ? billName(session) : "Table"} is running again.`, "success");
+      toast.show(`${session ? billTitle(session) : "Table"} is running again.`, "success");
       onClose();
     } else {
       // Refused: the bill has moved on (paid, split, on the Terminal). Show it as it is now.
@@ -350,7 +351,7 @@ function ChargeSheetBody({
 
   const cashLabelCents = bill && cashDueCents(bill.totalCents) !== bill.totalCents ? cashDueCents(bill.totalCents) : null;
   // A table's bill is "Charge Table 3"; a counter sale or a part has no table, so it goes by its label.
-  const title = session ? (session.kind === "table" ? `Charge ${billName(session)}` : billName(session)) : "Charge";
+  const title = session ? (session.kind === "table" ? `Charge ${billTitle(session)}` : billTitle(session)) : "Charge";
   const nothingToPay = !!bill && bill.totalCents <= 0;
   // A counter sale with nothing on it isn't a comped bill: it just hasn't been rung up yet.
   const emptySale = session?.kind === "counter" && session.itemsCents === 0;
@@ -423,6 +424,10 @@ function ChargeSheetBody({
           ) : null}
 
           <Total detail={detail} cash={mode === "cash" && session?.status === "awaiting_payment"} />
+
+          {session && !(session.status === "awaiting_payment" && (mode === "cash" || live)) ? (
+            <BillDetailsSection session={session} onSaved={load} disabled={pending} />
+          ) : null}
 
           {session && session.status === "awaiting_payment" && mode === "choose" ? (
             <>
@@ -590,7 +595,7 @@ function ChargeSheetBody({
       )}
 
       {continuing && session ? (
-        <Sheet title={`Keep playing on ${billName(session)}?`} onClose={() => setContinuing(false)} raised locked={pending}>
+        <Sheet title={`Keep playing on ${billTitle(session)}?`} onClose={() => setContinuing(false)} raised locked={pending}>
           <div className="flex flex-col gap-4">
             <p className="text-base text-muted">
               The table goes back to running and this bill is worked out again when it is next stopped. Items and any discount stay on it.
