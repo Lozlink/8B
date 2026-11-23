@@ -1,20 +1,21 @@
 import { Container } from "./container";
 import { formatTime, mapsUrl, site } from "@/lib/site/content";
 
-const linkClass = "rounded-sm text-chalk underline decoration-line underline-offset-4 hover:decoration-brand";
+const linkClass = "rounded-sm text-chalk underline decoration-chalk/30 decoration-2 underline-offset-[6px] hover:decoration-brand";
 
 export function FindUs() {
   const { address } = site;
   const hasContact = Boolean(site.phone || site.email || site.social?.length);
   return (
-    <section id="find-us" aria-labelledby="find-heading" className="scroll-mt-16 border-t border-line">
-      <Container className="grid gap-12 py-20 sm:py-28 lg:grid-cols-2 lg:gap-16">
+    <section id="find-us" aria-labelledby="find-heading" className="scroll-mt-20">
+      <Container className="grid gap-14 py-20 sm:py-28 lg:grid-cols-[1.35fr_1fr] lg:gap-16">
         <div>
-          <h2 id="find-heading" className="text-3xl font-bold tracking-tight sm:text-4xl">
+          <h2 id="find-heading" className="display text-[clamp(2.75rem,9vw,6rem)] text-chalk">
             {site.findUs.heading}
           </h2>
-          <p className="mt-4 max-w-md text-lg leading-relaxed text-muted">{site.findUs.lead}</p>
-          <address className="mt-10 text-3xl font-bold not-italic leading-tight tracking-tight sm:text-4xl">
+          <div className="chalk-rule mt-7" />
+          <p className="mt-7 max-w-xl text-xl leading-relaxed text-muted sm:text-2xl sm:leading-relaxed">{site.findUs.lead}</p>
+          <address className="mt-9 text-2xl font-semibold not-italic leading-snug text-accent sm:text-3xl">
             {address.unitAndStreet}
             <br />
             {address.suburb} {address.state} {address.postcode}
@@ -23,7 +24,7 @@ export function FindUs() {
             href={mapsUrl}
             target="_blank"
             rel="noopener noreferrer"
-            className="mt-8 inline-flex min-h-12 items-center rounded-lg bg-brand px-6 text-base font-bold text-on-brand transition-colors hover:bg-brand-dark"
+            className="mt-9 inline-flex min-h-14 items-center rounded-full bg-brand px-8 text-lg font-bold text-on-brand transition-colors hover:bg-accent"
           >
             {site.findUs.mapsCta}
             <span className="sr-only"> (opens in a new tab)</span>
@@ -31,14 +32,14 @@ export function FindUs() {
         </div>
 
         {(site.hours || hasContact) && (
-          <div className="space-y-10 self-end">
+          <div className="space-y-12 self-end">
             {site.hours && (
               <div>
-                <h3 className="text-sm font-semibold uppercase tracking-wider text-brand">Hours</h3>
-                <ul className="mt-3 divide-y divide-line border-y border-line">
+                <h3 className="display text-3xl text-chalk">Open</h3>
+                <ul className="mt-4 space-y-3 text-xl">
                   {site.hours.map((r) => (
-                    <li key={r.label} className="flex justify-between gap-6 py-4 text-lg">
-                      <span>{r.label}</span>
+                    <li key={r.label} className="flex justify-between gap-6">
+                      <span className="text-muted">{r.label}</span>
                       <span className="text-accent">
                         {formatTime(r.opens)} to {formatTime(r.closes)}
                       </span>
@@ -49,8 +50,8 @@ export function FindUs() {
             )}
             {hasContact && (
               <div>
-                <h3 className="text-sm font-semibold uppercase tracking-wider text-brand">Contact</h3>
-                <ul className="mt-3 space-y-2 text-lg">
+                <h3 className="display text-3xl text-chalk">Say g&apos;day</h3>
+                <ul className="mt-4 space-y-3 text-xl">
                   {site.phone && (
                     <li>
                       <a href={`tel:${site.phone.replace(/[^\d+]/g, "")}`} className={linkClass}>

@@ -29,16 +29,14 @@ export type SiteContent = {
   };
   geo: { latitude: number; longitude: number };
   tableCount: number;
-  openedOn: string;
   rate: { dollars: number; per: string };
-  minimumMinutes: number;
   staffSignInUrl: string;
   snacks: string;
-  payment: string;
 
-  hero: { heading: string; lead: string; primaryCta: string; secondaryCta: string };
-  pricing: { heading: string; lead: string };
-  expect: { heading: string; lead: string };
+  hero: { heading: string; lead: string; primaryCta: string };
+  price: { heading: string[]; lead: string; splits: { players: number; line: string }[]; small: string };
+  tables: { heading: string; lead: string };
+  counter: { heading: string; lead: string };
   findUs: { heading: string; lead: string; mapsCta: string };
   faqHeading: string;
   meta: { title: string; description: string; ogAlt: string };
@@ -54,8 +52,15 @@ export type SiteContent = {
   social: { label: string; url: string }[] | null;
   /** One plain sentence on bookings, e.g. how to book or that walk-ins only are taken. */
   bookings: string | null;
-  /** One plain sentence on table size or make. */
-  tables: string | null;
+  /** One plain sentence on table size or make. Added to the end of the tables blurb. */
+  tables_note: string | null;
+  /**
+   * Photos of the venue. Put the files in public/site/ and list them here; the "Have a look"
+   * block appears once there is at least one. The first is shown largest, so lead with the best
+   * shot of the room. `alt` says what is in the picture, for people who can't see it and for search.
+   * Up to seven are shown. JPG or WebP, around 2000px on the long side, is plenty.
+   */
+  photos: { src: string; alt: string }[] | null;
   /** One plain sentence on parking. */
   parking: string | null;
   /** One plain sentence on age rules. */
@@ -66,7 +71,7 @@ export const site: SiteContent = {
   name: "8 Ball Lounge",
   url: "https://8balllounge.com.au",
   address: {
-    unitAndStreet: "3/46 Court Rd",
+    unitAndStreet: "Shop 3/46 Court Rd",
     suburb: "Fairfield",
     state: "NSW",
     postcode: "2165",
@@ -74,37 +79,44 @@ export const site: SiteContent = {
   },
   geo: { latitude: -33.8691932, longitude: 150.9579043 },
   tableCount: 7,
-  openedOn: "November 2026",
   rate: { dollars: 25, per: "hour" },
-  minimumMinutes: 30,
   staffSignInUrl: "https://app.8balllounge.com.au",
-  snacks: "Chips, chocolate, biscuits and soft drinks",
-  payment: "Card and cash",
+  snacks: "Chips, chocolate, biscuits and cold soft drinks",
 
   hero: {
-    heading: "Pool tables in Fairfield",
-    lead: "A pool hall in Sydney's west with seven tables. Come in, pick a table and play.",
-    primaryCta: "See pricing",
-    secondaryCta: "Find us",
+    heading: "Rack 'em up, Fairfield.",
+    lead: "Fairfield's pool hall. Seven tables, cold drinks, and all the time you want to settle it properly.",
+    primaryCta: "Get directions",
   },
-  pricing: {
-    heading: "Pricing",
-    lead: "You pay for the table, not for each person. The rate is the same every day.",
+  price: {
+    // One line each.
+    heading: ["Twenty-five bucks an hour.", "For the whole table."],
+    lead: "You pay for the table, not per head. Bring one mate or five and it costs the same, so the more of you there are, the less it stings.",
+    splits: [
+      { players: 2, line: "Two of you" },
+      { players: 4, line: "Four of you" },
+      { players: 5, line: "Five of you" },
+    ],
+    small: "Half an hour minimum. Same price every day of the week, GST and all.",
   },
-  expect: {
-    heading: "What to expect",
-    lead: "Here is how it works when you walk in.",
+  tables: {
+    heading: "Seven tables. Pick one.",
+    lead: "Walk in, point at a table and it's yours. Play one frame or stay until someone finally admits they're beaten. The clock runs for as long as you do.",
+  },
+  counter: {
+    heading: "Thirsty work.",
+    lead: "Chips, chocolate, biscuits and cold soft drinks at the counter. Put them on your table and fix up the lot at the end, card or cash.",
   },
   findUs: {
-    heading: "Find us",
-    lead: "We are on Court Rd in Fairfield.",
+    heading: "Court Rd, Fairfield.",
+    lead: "Come find us. Bring someone you reckon you can beat.",
     mapsCta: "Open in Google Maps",
   },
-  faqHeading: "Questions",
+  faqHeading: "Before you ask",
   meta: {
-    title: "Pool Tables in Fairfield, Sydney | 8 Ball Lounge",
+    title: "Pool Hall in Fairfield, Sydney | 8 Ball Lounge",
     description:
-      "8 Ball Lounge has 7 pool tables in Fairfield, in Sydney's west. $25 an hour per table, the same every day. Find us at 3/46 Court Rd, Fairfield.",
+      "A pool hall in Fairfield, Western Sydney. Seven pool tables at $25 an hour for the whole table, however many of you are playing. Open 11 am till midnight, every day.",
     ogAlt: "8 Ball Lounge, pool tables in Fairfield",
   },
 
@@ -117,8 +129,10 @@ export const site: SiteContent = {
   phone: '0445 455 471',
   email: 'info@8balllounge.com.au',
   social: [ { label: 'Instagram', url: 'https://www.instagram.com/8.balllounge/'}],
-  bookings: null,
-  tables: null,
+  bookings: "Not yet. For now just walk in and pick a table.",
+  tables_note: null,
+  // e.g. [{ src: "/site/room.jpg", alt: "Seven pool tables under hanging lamps" }]
+  photos: null,
   parking: null,
   ageRules: null,
 };
@@ -131,45 +145,52 @@ export const mapsUrl = `https://www.google.com/maps/search/?api=1&query=${encode
 
 export const rateText = `$${site.rate.dollars} an ${site.rate.per}`;
 
-/** "16:00" becomes "4 pm", "16:30" becomes "4:30 pm". */
+/** "16:00" becomes "4 pm", "16:30" becomes "4:30 pm"; "24:00" and "00:00" are "midnight", "12:00" is "midday". */
 export function formatTime(hhmm: string): string {
   const [h, m] = hhmm.split(":").map(Number);
+  if (!m && h % 24 === 0) return "midnight";
+  if (!m && h === 12) return "midday";
   const suffix = h >= 12 ? "pm" : "am";
   const hour = h % 12 === 0 ? 12 : h % 12;
   return m ? `${hour}:${String(m).padStart(2, "0")} ${suffix}` : `${hour} ${suffix}`;
 }
+
+/**
+ * The hours in one line, when they are the same every day: "Open 11 am till midnight, every day."
+ * Null when they aren't known or differ by day (the Find us block lists those row by row).
+ */
+export const hoursLine: string | null =
+  site.hours?.length === 1 && site.hours[0].days.length === 7
+    ? `Open ${formatTime(site.hours[0].opens)} till ${formatTime(site.hours[0].closes)}, every day.`
+    : null;
 
 export type FaqItem = { question: string; answer: string };
 
 /** Built from the facts above, so the page and the search-engine data never disagree. */
 export const faqItems: FaqItem[] = [
   {
-    question: "How much does a table cost?",
-    answer: `${rateText} per table, not per person. GST is included and the rate is the same every day.`,
+    question: "How much is a table?",
+    answer: `${rateText} for the table, not per person. Split it between however many of you are playing. GST is included and it's the same price every day.`,
   },
   {
-    question: "Is there a minimum time?",
-    answer: `Yes, ${site.minimumMinutes} minutes. After that you pay for the time you play.`,
+    question: "Is there a minimum?",
+    answer: `Half an hour. After that you just pay for the time you play.`,
   },
   {
-    question: "How many tables do you have?",
-    answer: `${site.tableCount} pool tables.`,
+    question: "How many tables are there?",
+    answer: `${site.tableCount}. Walk in and pick one.`,
   },
   {
     question: "Where are you?",
-    answer: `${fullAddress}. We are in Fairfield, in Sydney's west.`,
+    answer: `${fullAddress}, in Sydney's west.`,
   },
   {
-    question: "Can I buy snacks and drinks?",
-    answer: `Yes. The counter sells ${site.snacks.toLowerCase()}.`,
+    question: "Can we get snacks and drinks?",
+    answer: `Yes. ${site.snacks} at the counter. They go on your table's bill and you pay for everything at the end.`,
   },
   {
-    question: "Do you take card?",
-    answer: `${site.payment} are both fine.`,
-  },
-  {
-    question: "When did you open?",
-    answer: `${site.openedOn}.`,
+    question: "Card or cash?",
+    answer: "Either.",
   },
   ...(site.hours
     ? [

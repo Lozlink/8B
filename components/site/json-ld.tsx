@@ -30,7 +30,8 @@ export function JsonLd() {
       "@type": "OpeningHoursSpecification",
       dayOfWeek: r.days,
       opens: r.opens,
-      closes: r.closes,
+      // Search engines read a day that runs to midnight as closing at 23:59.
+      closes: r.closes === "24:00" ? "23:59" : r.closes,
     }));
   }
 

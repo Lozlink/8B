@@ -1,0 +1,234 @@
+/*
+ * The public site's own look: a pool table seen from above, lit from overhead, in a dark room.
+ * Colours here are the table's (cloth, rail, the numbered balls); the venue's orange and cream
+ * come from the shared theme in globals.css.
+ */
+
+.site {
+  --felt: #0f7052;
+  --felt-deep: #06382a;
+  --rail: #1c130d;
+  --rail-edge: #3a281b;
+  --cue-white: #f4f1ec;
+  font-family: var(--font-barlow), system-ui, sans-serif;
+}
+
+/* Headlines: the condensed cut of the same family, set like signage. */
+.site .display {
+  font-family: var(--font-barlow-condensed), var(--font-barlow), sans-serif;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: -0.005em;
+  line-height: 0.9;
+}
+
+/* ---- The table --------------------------------------------------------- */
+
+.pool-table {
+  position: relative;
+  padding: clamp(14px, 2.4vw, 30px);
+  border-radius: clamp(22px, 3.4vw, 44px);
+  background: linear-gradient(180deg, var(--rail-edge), var(--rail) 14%, var(--rail) 86%, #120b07);
+  box-shadow:
+    0 40px 80px -30px rgba(0, 0, 0, 0.9),
+    inset 0 1px 0 rgba(255, 255, 255, 0.08);
+}
+
+/* Sights along the long rails. */
+.pool-table::before,
+.pool-table::after {
+  content: "";
+  position: absolute;
+  left: 9%;
+  right: 9%;
+  height: clamp(14px, 2.4vw, 30px);
+  background: radial-gradient(circle, rgba(246, 231, 210, 0.75) 0 2px, transparent 2.6px) center / 12.5% 100% repeat-x;
+  pointer-events: none;
+}
+.pool-table::before {
+  top: 0;
+}
+.pool-table::after {
+  bottom: 0;
+}
+
+.felt {
+  position: relative;
+  overflow: hidden;
+  border-radius: clamp(8px, 1.2vw, 14px);
+  /* The lamp over the table, then the cloth, with a faint weave so it isn't a flat fill. */
+  background:
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='1.1' numOctaves='2' stitchTiles='stitch'/%3E%3CfeColorMatrix values='0 0 0 0 0  0 0 0 0 0  0 0 0 0 0  0 0 0 .55 0'/%3E%3C/filter%3E%3Crect width='160' height='160' filter='url(%23n)' opacity='.5'/%3E%3C/svg%3E"),
+    radial-gradient(120% 90% at 38% 30%, #17936c 0%, var(--felt) 34%, var(--felt-deep) 100%);
+  box-shadow:
+    inset 0 0 0 1px rgba(0, 0, 0, 0.5),
+    inset 0 10px 30px rgba(0, 0, 0, 0.55),
+    inset 0 -6px 18px rgba(0, 0, 0, 0.4);
+}
+
+.pocket {
+  position: absolute;
+  z-index: 2;
+  width: clamp(26px, 4.4vw, 58px);
+  aspect-ratio: 1;
+  border-radius: 50%;
+  background: radial-gradient(circle at 50% 40%, #000 55%, #1a120c 100%);
+  box-shadow: inset 0 3px 8px rgba(0, 0, 0, 0.9);
+  transform: translate(-50%, -50%);
+  --in: clamp(12px, 2vw, 26px);
+}
+.pocket-tl { left: var(--in); top: var(--in); }
+.pocket-tr { left: calc(100% - var(--in)); top: var(--in); }
+.pocket-bl { left: var(--in); top: calc(100% - var(--in)); }
+.pocket-br { left: calc(100% - var(--in)); top: calc(100% - var(--in)); }
+/* The middle pockets sit on the long rails: the sides on a phone, top and bottom on a wide screen. */
+.pocket-m1 { left: calc(var(--in) * 0.7); top: 50%; }
+.pocket-m2 { left: calc(100% - var(--in) * 0.7); top: 50%; }
+@media (min-width: 1024px) {
+  .pocket-m1 { left: 50%; top: calc(var(--in) * 0.7); }
+  .pocket-m2 { left: 50%; top: calc(100% - var(--in) * 0.7); }
+}
+
+/* ---- Balls ------------------------------------------------------------- */
+
+.ball {
+  --c: #111;
+  --d: 3rem;
+  display: grid;
+  place-items: center;
+  width: var(--d);
+  aspect-ratio: 1;
+  border-radius: 50%;
+  font-size: var(--d);
+  background:
+    radial-gradient(circle at 32% 26%, rgba(255, 255, 255, 0.7) 0 5%, rgba(255, 255, 255, 0) 24%),
+    radial-gradient(circle at 46% 42%, var(--c) 0 55%, color-mix(in srgb, var(--c) 45%, #000) 100%);
+  box-shadow:
+    0 0.14em 0.1em rgba(0, 0, 0, 0.35),
+    0.06em 0.22em 0.3em rgba(0, 0, 0, 0.45);
+}
+.ball > span {
+  display: grid;
+  place-items: center;
+  width: 0.46em;
+  height: 0.46em;
+  border-radius: 50%;
+  background: var(--cue-white);
+  color: #141414;
+}
+.ball > span > b {
+  font-family: var(--font-barlow-condensed), sans-serif;
+  font-size: 0.3em;
+  font-weight: 800;
+  line-height: 1;
+}
+.ball-cue {
+  --c: var(--cue-white);
+  background:
+    radial-gradient(circle at 32% 26%, #fff 0 8%, rgba(255, 255, 255, 0) 30%),
+    radial-gradient(circle at 46% 42%, var(--cue-white) 0 50%, #a9a59c 100%);
+}
+.ball-1 { --c: #f0bb1f; }
+.ball-2 { --c: #1c4fc0; }
+.ball-3 { --c: #d2302a; }
+.ball-4 { --c: #5d2f93; }
+.ball-5 { --c: #f47b20; }
+.ball-6 { --c: #13684a; }
+.ball-7 { --c: #7c2130; }
+.ball-8 { --c: #121212; }
+
+/* ---- The break (hero, once, on load) ----------------------------------- */
+
+.break-field {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+.break-field .ball {
+  --d: clamp(40px, 12.5vw, 64px);
+  position: absolute;
+  left: var(--x);
+  top: var(--y);
+  translate: -50% -50%;
+  animation: break 1.5s cubic-bezier(0.12, 0.8, 0.22, 1) 0.75s both;
+}
+.break-field .ball > span {
+  animation: roll 1.5s cubic-bezier(0.12, 0.8, 0.22, 1) 0.75s both;
+}
+/* The cue ball arrives first, then everything else leaves the rack as it lands. */
+.break-field .ball-cue {
+  animation: cue 1.95s cubic-bezier(0.3, 0.6, 0.3, 1) 0.3s both;
+}
+@keyframes break {
+  from {
+    left: var(--rx);
+    top: var(--ry);
+  }
+}
+@keyframes roll {
+  from {
+    rotate: var(--spin, -300deg);
+  }
+}
+@keyframes cue {
+  0% {
+    left: var(--sx);
+    top: var(--sy);
+    animation-timing-function: cubic-bezier(0.5, 0, 0.9, 0.6);
+  }
+  23% {
+    left: var(--hx);
+    top: var(--hy);
+    animation-timing-function: cubic-bezier(0.12, 0.8, 0.22, 1);
+  }
+}
+@media (min-width: 1024px) {
+  .break-field .ball {
+    --d: clamp(56px, 6vw, 92px);
+    left: var(--lx);
+    top: var(--ly);
+    animation-name: break-wide;
+  }
+  .break-field .ball-cue {
+    animation-name: cue-wide;
+  }
+  @keyframes break-wide {
+    from {
+      left: var(--lrx);
+      top: var(--lry);
+    }
+  }
+  @keyframes cue-wide {
+    0% {
+      left: var(--lsx);
+      top: var(--lsy);
+      animation-timing-function: cubic-bezier(0.5, 0, 0.9, 0.6);
+    }
+    23% {
+      left: var(--lhx);
+      top: var(--lhy);
+      animation-timing-function: cubic-bezier(0.12, 0.8, 0.22, 1);
+    }
+  }
+}
+
+/* A chalk line under a heading: drawn by hand, not ruled. */
+.chalk-rule {
+  height: 6px;
+  width: 5.5rem;
+  border-radius: 3px;
+  background: var(--color-brand);
+  transform: rotate(-1.2deg);
+}
+
+/* The FAQ's open/close mark. */
+.site details > summary {
+  list-style: none;
+  cursor: pointer;
+}
+.site details > summary::-webkit-details-marker {
+  display: none;
+}
+.site details[open] .faq-mark {
+  rotate: 45deg;
+}
