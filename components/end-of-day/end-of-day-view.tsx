@@ -12,6 +12,7 @@ import { useToast } from "@/components/toast";
 import { Button, Field, Notice, Spinner, inputClass } from "@/components/ui";
 import { ApiError, api } from "@/lib/client/api";
 import { describeDifference, differenceCents, expectedCashCents, formatBusinessDate, isBusinessDate, type CloseCheck } from "@/lib/client/day-close";
+import { buildCloseReportPdf, closeReportFilename, sharePdf } from "@/lib/client/day-close-pdf";
 import { authRedirect, errorMessage } from "@/lib/client/errors";
 import { useFloor } from "@/lib/client/floor-context";
 import { useAction } from "@/lib/client/use-action";
@@ -293,7 +294,7 @@ function DayPanel({
             title={`End of day, ${formatBusinessDate(state.businessDate)}`}
             actions={
               <div className="flex flex-wrap gap-2 print:hidden">
-                <Button onClick={() => window.print()}>Print</Button>
+                <PdfButton close={latest} tz={tz} title={`End of day, ${formatBusinessDate(state.businessDate)}`} />
                 {!reclosing ? <Button onClick={() => setReclosing(true)}>Close again</Button> : null}
               </div>
             }
@@ -423,5 +424,33 @@ function RunningNotice({ running }: { running: DayCloseStateDTO["running"] }) {
         </Link>
       </Notice>
     </section>
+  );
+}
+
+/**
+ * Makes the report as a PDF and hands it to the iPad's share sheet (Print, Save to Files, AirDrop,
+ * Mail); on a computer it downloads. `window.print()` is not used: a web app opened from the Home
+ * Screen icon ignores it.
+ */
+function PdfButton({ close, tz, title }: { close: DayCloseDTO; tz: string; title: string }) {
+  const toast = useToast();
+  const [busy, setBusy] = useState(false);
+  const make = async () => {
+    if (busy) return;
+    setBusy(true);
+    try {
+      const bytes = await buildCloseReportPdf(close, tz, title);
+      const how = await sharePdf(bytes, closeReportFilename(close));
+      if (how === "downloaded") toast.show("PDF saved to your downloads.", "success");
+    } catch {
+      toast.show("Couldn't make the PDF. Try again.", "error");
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <Button onClick={() => void make()} disabled={busy}>
+      {busy ? "Making PDF…" : "Print or save PDF"}
+    </Button>
   );
 }
