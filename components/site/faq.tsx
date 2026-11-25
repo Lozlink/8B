@@ -1,4 +1,5 @@
 import { Container } from "./container";
+import { SiteLink } from "./site-link";
 import { faqItems, site } from "@/lib/site/content";
 
 export function Faq() {
@@ -17,7 +18,20 @@ export function Faq() {
                   +
                 </span>
               </summary>
-              <p className="max-w-xl pb-6 text-lg leading-relaxed text-muted">{f.answer}</p>
+              <p className="max-w-xl pb-6 text-lg leading-relaxed text-muted">
+                {f.answer}
+                {f.link ? (
+                  <>
+                    {" "}
+                    <SiteLink
+                      href={f.link.href}
+                      className="rounded-sm text-chalk underline decoration-chalk/30 decoration-2 underline-offset-[5px] hover:decoration-brand"
+                    >
+                      {f.link.label}
+                    </SiteLink>
+                  </>
+                ) : null}
+              </p>
             </details>
           ))}
         </div>

@@ -515,6 +515,27 @@ export interface AdminStateDTO {
   devices: AdminDeviceDTO[];
   /** null when Square isn't configured on the server. */
   squareEnvironment: "sandbox" | "production" | null;
+  /** Enquiries from the public site's forms nobody has marked as dealt with yet. */
+  openEnquiries: number;
+}
+
+/** An enquiry sent from one of the public site's forms. */
+export interface EnquiryDTO {
+  id: string;
+  /** Which page's form: the functions page or the contact page. */
+  kind: "functions" | "contact";
+  /** ISO */
+  createdAt: string;
+  name: string;
+  company: string | null;
+  email: string;
+  phone: string | null;
+  /** "YYYY-MM-DD" on the venue's calendar, when they gave one. */
+  preferredDate: string | null;
+  groupSize: number | null;
+  message: string | null;
+  /** Set once a manager has marked it as dealt with. `at` is ISO. */
+  handled: { at: string; byName: string | null } | null;
 }
 
 // ---------------------------------------------------------------------------

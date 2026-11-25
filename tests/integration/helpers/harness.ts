@@ -41,6 +41,8 @@ export const BILL_EXTRAS_SQL = read("20261119000000_bill_extras.sql");
 export const STOCK_SQL = read("20261121000000_stock_and_barcodes.sql");
 export const PRODUCT_IMAGES_SQL = read("20261121000100_product_images.sql");
 export const NAMES_COSTS_CLOSE_SQL = read("20261123000000_names_costs_day_close.sql");
+export const ENQUIRIES_SQL = read("20261126000000_enquiries.sql");
+export const ENQUIRY_KIND_SQL = read("20261126000100_enquiry_kind.sql");
 
 /** What Supabase provides out of the box. There is deliberately no `realtime` schema. */
 export const PRELUDE_SQL = `
@@ -102,6 +104,8 @@ export async function bootHarness(): Promise<Harness> {
   await pg.exec(`begin;\n${STOCK_SQL}\ncommit;`);
   await pg.exec(`begin;\n${PRODUCT_IMAGES_SQL}\ncommit;`);
   await pg.exec(`begin;\n${NAMES_COSTS_CLOSE_SQL}\ncommit;`);
+  await pg.exec(`begin;\n${ENQUIRIES_SQL}\ncommit;`);
+  await pg.exec(`begin;\n${ENQUIRY_KIND_SQL}\ncommit;`);
 
   const server = new PGLiteSocketServer({ db: pg, port: 0, host: "127.0.0.1" });
   await server.start();
@@ -165,7 +169,7 @@ export async function bootHarness(): Promise<Harness> {
         // Replica mode skips the no-delete triggers; this is test setup only.
         await pg.exec(`
           set session_replication_role = replica;
-          truncate public.audit_log, public.webhook_events, public.refunds, public.stock_moves, public.square_cash_records, public.terminal_checkouts,
+          truncate public.enquiries, public.audit_log, public.webhook_events, public.refunds, public.stock_moves, public.square_cash_records, public.terminal_checkouts,
             public.session_items, public.session_intervals, public.sessions, public.products, public.discounts, public.login_attempts, public.devices,
             public.rate_cards, public.tables, public.settings, public.staff restart identity cascade;
           update public.catalog_state set synced_at = null, table_hire_variation_id = null, last_error = null,

@@ -38,6 +38,32 @@ export type SiteContent = {
   tables: { heading: string; lead: string };
   counter: { heading: string; lead: string };
   findUs: { heading: string; lead: string; mapsCta: string };
+  /** What the enquiry form says on both the functions and contact pages (components/site/enquiry-form.tsx). */
+  form: {
+    submit: string;
+    sentHeading: string;
+    sentLead: string;
+    /** Under the form, next to the button. */
+    privacy: string;
+  };
+  /** The /functions page (components/site/functions.tsx). */
+  functions: {
+    navLabel: string;
+    meta: { title: string; description: string };
+    heading: string;
+    lead: string;
+    /** Follows the bookings answer in the FAQ and links to the page. */
+    faqLink: string;
+  };
+  /** The /contact page (components/site/contact.tsx). */
+  contact: {
+    navLabel: string;
+    meta: { title: string; description: string };
+    heading: string;
+    lead: string;
+    /** In the Find us block on the home page, under the phone and email. */
+    findUsLink: string;
+  };
   faqHeading: string;
   meta: { title: string; description: string; ogAlt: string };
 
@@ -112,6 +138,33 @@ export const site: SiteContent = {
     lead: "Come find us. Bring someone you reckon you can beat.",
     mapsCta: "Open in Google Maps",
   },
+  functions: {
+    navLabel: "Functions",
+    meta: {
+      title: "Functions and Work Parties in Fairfield | 8 Ball Lounge",
+      description:
+        "Work parties, team days and group nights at 8 Ball Lounge in Fairfield, Western Sydney. Seven pool tables, open 11 am till midnight every day. Send us the details.",
+    },
+    heading: "Bring the office.",
+    lead: "The end-of-year party, or any excuse really. Tell us when and how many.",
+    faqLink: "Give us a heads-up.",
+  },
+  contact: {
+    navLabel: "Contact",
+    meta: {
+      title: "Contact | 8 Ball Lounge, Fairfield",
+      description: "Get in touch with 8 Ball Lounge, the pool hall on Court Rd, Fairfield. Call, email or send us a message.",
+    },
+    heading: "Say g'day.",
+    lead: "Ask away.",
+    findUsLink: "Send us a message",
+  },
+  form: {
+    submit: "Send it",
+    sentHeading: "Got it.",
+    sentLead: "We'll be in touch.",
+    privacy: "We only use this to get back to you.",
+  },
   faqHeading: "Before you ask",
   meta: {
     title: "Pool Hall in Fairfield, Sydney | 8 Ball Lounge",
@@ -129,7 +182,7 @@ export const site: SiteContent = {
   phone: '0445 455 471',
   email: 'info@8balllounge.com.au',
   social: [ { label: 'Instagram', url: 'https://www.instagram.com/8.balllounge/'}],
-  bookings: "Not yet. For now just walk in and pick a table.",
+  bookings: "Tables are walk-in. Bringing a crew?",
   tables_note: null,
   // e.g. [{ src: "/site/room.jpg", alt: "Seven pool tables under hanging lamps" }]
   photos: [
@@ -169,7 +222,12 @@ export const hoursLine: string | null =
     ? `Open ${formatTime(site.hours[0].opens)} till ${formatTime(site.hours[0].closes)}, every day.`
     : null;
 
-export type FaqItem = { question: string; answer: string };
+export type FaqItem = {
+  question: string;
+  answer: string;
+  /** Shown after the answer as a link. Search-engine data gets its label as plain text. */
+  link?: { label: string; href: string };
+};
 
 /** Built from the facts above, so the page and the search-engine data never disagree. */
 export const faqItems: FaqItem[] = [
@@ -205,7 +263,9 @@ export const faqItems: FaqItem[] = [
         },
       ]
     : []),
-  ...(site.bookings ? [{ question: "Can I book a table?", answer: site.bookings }] : []),
+  ...(site.bookings
+    ? [{ question: "Can I book a table?", answer: site.bookings, link: { label: site.functions.faqLink, href: "/functions" } }]
+    : []),
   ...(site.parking ? [{ question: "Is there parking?", answer: site.parking }] : []),
   ...(site.ageRules ? [{ question: "Is there an age limit?", answer: site.ageRules }] : []),
 ];

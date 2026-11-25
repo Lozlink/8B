@@ -11,6 +11,7 @@ import { authRedirect, errorMessage, isManagerRequired } from "@/lib/client/erro
 import type { AdminStateDTO } from "@/lib/domain/types";
 import { AuditTab } from "./audit-tab";
 import { DevicesTab } from "./devices-tab";
+import { EnquiriesTab } from "./enquiries-tab";
 import { ItemsTab } from "./items-tab";
 import { ProfitTab } from "./profit-tab";
 import { RatesTab } from "./rates-tab";
@@ -21,6 +22,7 @@ import { TerminalTab } from "./terminal-tab";
 
 const TABS = [
   { id: "tables", label: "Tables" },
+  { id: "enquiries", label: "Enquiries" },
   { id: "rates", label: "Rate cards" },
   { id: "items", label: "Items" },
   { id: "profit", label: "Profit" },
@@ -118,12 +120,19 @@ export function AdminView() {
             }`}
           >
             {t.label}
+            {t.id === "enquiries" && phase.state.openEnquiries > 0 ? (
+              <span className="ml-2 inline-flex min-w-6 justify-center rounded-full bg-chalk/15 px-1.5 text-sm tabular-nums">
+                {phase.state.openEnquiries}
+                <span className="sr-only"> open</span>
+              </span>
+            ) : null}
           </button>
         ))}
       </div>
 
       <div id="admin-panel" role="tabpanel" aria-labelledby={`tab-${tab}`}>
         {tab === "tables" ? <TablesTab {...tabProps} /> : null}
+        {tab === "enquiries" ? <EnquiriesTab {...tabProps} /> : null}
         {tab === "rates" ? <RatesTab {...tabProps} /> : null}
         {tab === "items" ? <ItemsTab {...tabProps} /> : null}
         {tab === "profit" ? <ProfitTab {...tabProps} /> : null}

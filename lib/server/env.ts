@@ -10,6 +10,8 @@ import { AppError } from "./errors";
  *   squareEnv()  — Square Terminal API; only checked when a Square feature is used, so the venue
  *                  can run on the brief's fallback (ring up in Square POS + "Mark paid") without it.
  *   webhookEnv() — Square webhook signature verification; only checked by the webhook route.
+ *   mailEnv()    — Amazon SES, to email the venue when someone sends an enquiry from the public
+ *                  site. Optional: without it enquiries still land in Admin → Enquiries.
  *
  * Values come from .env files loaded by Next (production: the dotenvx-encrypted .env.production,
  * decrypted by @dotenvx/next-env using DOTENV_PRIVATE_KEY_PRODUCTION) or from the host's env vars.
@@ -43,7 +45,19 @@ const webhookSchema = z.object({
   SQUARE_WEBHOOK_URL: z.string().regex(/^https:\/\//, "must be an https:// URL"),
 });
 
+/** Optional: email the venue when an enquiry comes in (lib/server/mailer.ts). */
+const mailSchema = z.object({
+  SES_AWS_REGION: z.string().min(1, "is empty"),
+  SES_AWS_ACCESS_KEY_ID: z.string().min(1, "is empty"),
+  SES_AWS_SECRET_ACCESS_KEY: z.string().min(1, "is empty"),
+  /** An address on a domain verified in SES, e.g. "8 Ball Lounge <enquiries@8balllounge.com.au>". */
+  ENQUIRY_FROM_EMAIL: z.string().min(3, "is empty"),
+  /** Who gets the emails. Defaults to the email address on the public site. */
+  ENQUIRY_TO_EMAIL: z.string().min(3, "is empty").optional(),
+});
+
 export type ServerEnv = z.infer<typeof coreSchema>;
+export type MailEnv = z.infer<typeof mailSchema>;
 export type SquareEnv = z.infer<typeof squareSchema>;
 export type WebhookEnv = z.infer<typeof webhookSchema>;
 
@@ -68,6 +82,7 @@ function check<T extends z.ZodRawShape>(
 let core: ServerEnv | null = null;
 let square: SquareEnv | null = null;
 let webhook: WebhookEnv | null = null;
+let mail: MailEnv | null = null;
 
 export function env(): ServerEnv {
   if (core) return core;
@@ -154,9 +169,27 @@ export function webhookEnv(): WebhookEnv | null {
   return webhook;
 }
 
+/**
+ * null when SES isn't set up: no email is sent, and nothing is logged if none of its keys are set
+ * at all. Some set but not all (or still encrypted) is a mistake worth a line in the log.
+ */
+export function mailEnv(): MailEnv | null {
+  if (mail) return mail;
+  const keys = Object.keys(mailSchema.shape);
+  if (!keys.some((k) => process.env[k])) return null;
+  const r = check(mailSchema);
+  if (!r.data) {
+    console.error("[env] Enquiry email (SES) not configured:", r.problems.join("; "));
+    return null;
+  }
+  mail = r.data;
+  return mail;
+}
+
 /** Tests only: forget validated values so a test can change process.env. */
 export function resetEnvCacheForTests(): void {
   core = null;
   square = null;
   webhook = null;
+  mail = null;
 }

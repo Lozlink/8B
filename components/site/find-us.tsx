@@ -1,4 +1,5 @@
 import { Container } from "./container";
+import { SiteLink } from "./site-link";
 import { formatTime, mapsUrl, site } from "@/lib/site/content";
 
 const linkClass = "rounded-sm text-chalk underline decoration-chalk/30 decoration-2 underline-offset-[6px] hover:decoration-brand";
@@ -73,6 +74,11 @@ export function FindUs() {
                       </a>
                     </li>
                   ))}
+                  <li>
+                    <SiteLink href="/contact" className={linkClass}>
+                      {site.contact.findUsLink}
+                    </SiteLink>
+                  </li>
                 </ul>
               </div>
             )}

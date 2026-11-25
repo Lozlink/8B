@@ -7,6 +7,7 @@ import { assertPinUnique, hashPin, type Actor, type Manager } from "./auth";
 import { audit } from "./audit";
 import { db, withTx, type Tx } from "./db";
 import { squareEnv, squareEnvironmentOrNull } from "./env";
+import { countOpenEnquiries } from "./enquiries";
 import { badRequest, conflict, notFound } from "./errors";
 import { getCatalogState, getDiscounts, getProducts, getSettings, mapRateCard, type RateCardRow } from "./repo";
 import { productDTO } from "./queries";
@@ -32,7 +33,7 @@ const sortedDays = (days: number[]) => [...new Set(days)].sort((a, b) => a - b);
 
 export async function getAdminState(manager: Manager): Promise<AdminStateDTO> {
   const q = db();
-  const [tables, rateCards, settings, staff, devices, products, catalog, squareCash, discounts, held, stock] = await Promise.all([
+  const [tables, rateCards, settings, staff, devices, products, catalog, squareCash, discounts, held, stock, openEnquiries] = await Promise.all([
     q<{ id: string; name: string; sort_order: number; active: boolean }[]>`
       select id, name, sort_order, active from public.tables order by sort_order, name`,
     q<RateCardRow[]>`
@@ -50,6 +51,7 @@ export async function getAdminState(manager: Manager): Promise<AdminStateDTO> {
     getDiscounts(q, { activeOnly: false }),
     heldStock(q),
     getStockOutstanding(q),
+    countOpenEnquiries(q),
   ]);
   return {
     manager,
@@ -98,6 +100,7 @@ export async function getAdminState(manager: Manager): Promise<AdminStateDTO> {
       revokedAt: d.revoked_at?.toISOString() ?? null,
     })),
     squareEnvironment: squareEnvironmentOrNull(),
+    openEnquiries,
   };
 }
 

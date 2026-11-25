@@ -29,6 +29,14 @@ export function formatDateTime(iso: string | Date, timeZone: string): string {
   return f.format(typeof iso === "string" ? new Date(iso) : iso);
 }
 
+const calendarDate = new Intl.DateTimeFormat("en-AU", { timeZone: "UTC", weekday: "short", day: "numeric", month: "short", year: "numeric" });
+
+/** "2026-12-12" → "Sat, 12 Dec 2026". A date on the calendar, not a moment, so it's read in UTC: no shift. */
+export function formatCalendarDate(ymd: string): string {
+  const [y, m, d] = ymd.split("-").map(Number);
+  return calendarDate.format(new Date(Date.UTC(y, m - 1, d)));
+}
+
 /** Elapsed clock for a running timer: 1:05:09 / 12:34. */
 export function formatClock(ms: number): string {
   const total = Math.max(0, Math.floor(ms / 1000));

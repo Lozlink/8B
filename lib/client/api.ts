@@ -21,6 +21,7 @@ import type {
   AuditEntryDTO,
   DayCloseDTO,
   DayCloseStateDTO,
+  EnquiryDTO,
   FloorDTO,
   MarkPaidOutcome,
   MeDTO,
@@ -440,6 +441,9 @@ export const api = {
   pairTerminal: () => post<PairingCodeDTO>("/api/admin/terminal/pair"),
   pairStatus: (codeId: string) => get<PairingCodeDTO>(`/api/admin/terminal/pair?codeId=${enc(codeId)}`),
   unpairTerminal: (reason: string) => post<{ ok: true }>("/api/admin/terminal/unpair", { reason }),
+
+  enquiries: () => get<{ enquiries: EnquiryDTO[] }>("/api/admin/enquiries"),
+  setEnquiryHandled: (id: string, handled: boolean) => post<{ ok: true }>("/api/admin/enquiries", { id, handled }),
 
   audit: (q: { before?: string; entity?: string; entityId?: string; action?: string } = {}) => {
     const params = new URLSearchParams();

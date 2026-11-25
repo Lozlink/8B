@@ -1,5 +1,6 @@
 import Image from "next/image";
 import { Container } from "./container";
+import { SiteLink } from "./site-link";
 import { fullAddress, site } from "@/lib/site/content";
 
 export function SiteFooter() {
@@ -9,6 +10,14 @@ export function SiteFooter() {
         <div>
           <Image src="/brand/logo-on-dark.png" alt={site.name} width={165} height={64} className="h-16 w-auto" />
           <p className="mt-5 text-lg text-muted">{fullAddress}</p>
+          <nav aria-label="Pages" className="mt-4 flex flex-wrap gap-x-6 gap-y-2 text-lg">
+            <SiteLink href="/functions" className="rounded-sm py-1 text-chalk underline decoration-line underline-offset-4 hover:decoration-brand">
+              {site.functions.navLabel}
+            </SiteLink>
+            <SiteLink href="/contact" className="rounded-sm py-1 text-chalk underline decoration-line underline-offset-4 hover:decoration-brand">
+              {site.contact.navLabel}
+            </SiteLink>
+          </nav>
         </div>
         <a
           href={site.staffSignInUrl}
