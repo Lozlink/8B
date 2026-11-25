@@ -74,8 +74,10 @@ export async function createTerminalCheckout(input: CreateCheckoutInput): Promis
           // No tipping on table hire; show the receipt screen (print/email/SMS on the Terminal).
           tipSettings: { allowTipping: false },
           skipReceiptScreen: false,
-          // With an order attached, list its lines on the Terminal before the buyer pays.
-          ...(input.orderId ? { showItemizedCart: true } : {}),
+          // Go straight to the tap/insert prompt. Square defaults this to true whenever an order is
+          // attached, which puts an itemised "confirm and pay" screen in front of the card reader,
+          // so it has to be switched off explicitly rather than left out.
+          showItemizedCart: false,
         },
       },
     }, UNDER_LOCK);

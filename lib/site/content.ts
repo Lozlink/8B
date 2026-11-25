@@ -132,7 +132,12 @@ export const site: SiteContent = {
   bookings: "Not yet. For now just walk in and pick a table.",
   tables_note: null,
   // e.g. [{ src: "/site/room.jpg", alt: "Seven pool tables under hanging lamps" }]
-  photos: null,
+  photos: [
+    { src: "/site/billiards-club-table.jpg", alt: "A player lines up a shot on a green table under the red No. 01 Billiards Club light, with the drinks fridges behind" },
+    { src: "/site/pool-tables.jpg", alt: "The main room: a row of blue pool tables, lounge chairs along the wall and games going on every table" },
+    { src: "/site/green-table-game.jpg", alt: "A game on a green table while friends watch from the lounge chairs" },
+    { src: "/site/counter-and-tables.jpg", alt: "Looking past the counter and its Open sign to the tables and the lounge" },
+  ],
   parking: null,
   ageRules: null,
 };
